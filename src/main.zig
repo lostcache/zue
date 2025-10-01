@@ -1,10 +1,10 @@
 const std = @import("std");
-const zueue = @import("zueue");
+const zue = @import("zue");
 
 pub fn main() !void {
     // Prints to stderr, ignoring potential errors.
     std.debug.print("All your {s} are belong to us.\n", .{"codebase"});
-    try zueue.bufferedPrint();
+    try zue.bufferedPrint();
 }
 
 test "simple test" {
