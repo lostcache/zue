@@ -72,11 +72,12 @@ test "OnDisk.serializedSize" {
 }
 
 test "OnDisk.serialize" {
+    const t_alloc = std.testing.allocator;
     const record = Record{ .key = "key", .value = "value" };
-    var buffer = std.ArrayList(u8).init(std.testing.allocator);
-    defer buffer.deinit();
+    var buffer: std.ArrayList(u8) = .empty;
+    defer buffer.deinit(t_alloc);
 
-    const writer = buffer.writer();
+    const writer = buffer.writer(t_alloc);
     try OnDisk.serialize(record, writer);
 
     // Expected size: CRC(4) + Timestamp(8) + KeyLen(4) + Key(3) + ValueLen(4) + Value(5) = 28
