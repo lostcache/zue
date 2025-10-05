@@ -1,61 +1,148 @@
 const std = @import("std");
 
+/// Record
+/// | Field        | Data Type    | Size (bytes) |
+/// | :----------- | :----------- | :----------- |
+/// | CRC32        | `u32`        | 4            |
+/// | Timestamp    | `i64`        | 8            |
+/// | Key Length   | `i32`        | 4            |
+/// | Key          | `[]const u8` | >=0, <=256   |
+/// | Value Length | `i32`        | 4            |
+/// | Value        | `[]const u8` | >0, <=65536  |
+const KEY_LEN_MAX = 256;
+const KEY_LEN_MIN = 0;
+const VALUE_LEN_MAX = 65536;
+const VALUE_LEN_MIN = 1;
+
+const CRC = @sizeOf(u32);
+const TIMESTAMP = @sizeOf(i64);
+const KEY_LEN_HOLDER = @sizeOf(i32);
+const VALUE_LEN_HOLDER = @sizeOf(i32);
+
+const RECORD_HEADER_SIZE = CRC + TIMESTAMP + KEY_LEN_HOLDER + VALUE_LEN_HOLDER;
+
 pub const Record = struct {
     key: ?[]const u8,
     value: []const u8,
 };
 
 pub const OnDisk = struct {
-    /// | Field        | Data Type    | Size (bytes) |
-    /// | :----------- | :----------- | :----------- |
-    /// | CRC32        | `u32`        | 4            |
-    /// | Timestamp    | `i64`        | 8            |
-    /// | Key Length   | `i32`        | 4            |
-    /// | Key          | `[]const u8` | Variable     |
-    /// | Value Length | `i32`        | 4            |
-    /// | Value        | `[]const u8` | Variable     |
     pub fn serializedSize(record: Record) usize {
         var size: usize = 0;
-        size += @sizeOf(u32); // CRC32
-        size += @sizeOf(i64); // Timestamp
-        size += @sizeOf(i32); // Key Length
+        size += RECORD_HEADER_SIZE;
         if (record.key) |k| {
+            std.debug.assert(k.len >= KEY_LEN_MIN);
+            std.debug.assert(k.len <= KEY_LEN_MAX);
+
             size += k.len;
         }
-        size += @sizeOf(i32); // Value Length
-        size += record.value.len; // Value
+
+        std.debug.assert(record.value.len >= VALUE_LEN_MIN);
+        std.debug.assert(record.value.len <= VALUE_LEN_MAX);
+
+        size += record.value.len;
         return size;
     }
 
-    /// Serializes the record into its on-disk binary format and writes it to the provided writer.
-    /// The format is: CRC32 (u32) | Timestamp (i64) | KeyLen (i32) | Key ([]u8) | ValueLen (i32) | Value ([]u8)
-    /// All integers are little-endian.
-    pub fn serialize(record: Record, writer: anytype) !void {
-        const timestamp: i64 = std.time.milliTimestamp();
-        const key_len: i32 = if (record.key) |k| @intCast(k.len) else -1;
-        const value_len: i32 = @intCast(record.value.len);
-
-        // To calculate the CRC, we first hash all the other fields in little-endian byte order.
+    fn compute_crc(record: Record, timestamp: i64, key_len: i32, value_len: i32) u32 {
         var crc_hasher = std.hash.Crc32.init();
+
         crc_hasher.update(std.mem.toBytes(timestamp)[0..]);
         crc_hasher.update(std.mem.toBytes(key_len)[0..]);
+
         if (record.key) |k| {
+            std.debug.assert(k.len >= KEY_LEN_MIN);
+            std.debug.assert(k.len <= KEY_LEN_MAX);
+
             crc_hasher.update(k);
         }
+
         crc_hasher.update(std.mem.toBytes(value_len)[0..]);
+
+        std.debug.assert(record.value.len >= VALUE_LEN_MIN);
+        std.debug.assert(record.value.len <= VALUE_LEN_MAX);
+
         crc_hasher.update(record.value);
 
-        const crc = crc_hasher.final();
+        return crc_hasher.final();
+    }
 
-        // Now, write all fields to the actual writer, starting with the CRC.
+    fn write_serialized(writer: anytype, crc: u32, timestamp: i64, key_len: i32, value_len: i32, record: Record) !void {
         try writer.writeInt(u32, crc, .little);
         try writer.writeInt(i64, timestamp, .little);
         try writer.writeInt(i32, key_len, .little);
+
         if (record.key) |k| {
+            std.debug.assert(k.len >= KEY_LEN_MIN);
+            std.debug.assert(k.len <= KEY_LEN_MAX);
+
             try writer.writeAll(k);
         }
+
         try writer.writeInt(i32, value_len, .little);
+
+        std.debug.assert(record.value.len > VALUE_LEN_MIN);
+        std.debug.assert(record.value.len <= VALUE_LEN_MAX);
+
         try writer.writeAll(record.value);
+    }
+
+    pub fn serialize(record: Record, writer: anytype) !void {
+        const timestamp: i64 = std.time.milliTimestamp();
+        const key_len: i32 = if (record.key) |k| @intCast(k.len) else 0;
+        std.debug.assert(key_len >= KEY_LEN_MIN);
+        std.debug.assert(key_len <= KEY_LEN_MAX);
+
+        const value_len: i32 = @intCast(record.value.len);
+        std.debug.assert(value_len >= VALUE_LEN_MIN);
+        std.debug.assert(value_len <= VALUE_LEN_MAX);
+
+        const crc = compute_crc(record, timestamp, key_len, value_len);
+
+        try write_serialized(writer, crc, timestamp, key_len, value_len, record);
+    }
+
+    fn verify_crc(crc: u32, timestamp: i64, record: Record) error{CRCMismatch}!void {
+        const key_len: i32 = if (record.key) |k| @intCast(k.len) else 0;
+        std.debug.assert(key_len >= KEY_LEN_MIN);
+        std.debug.assert(key_len <= KEY_LEN_MAX);
+
+        const value_len: i32 = @intCast(record.value.len);
+        std.debug.assert(value_len >= VALUE_LEN_MIN);
+        std.debug.assert(value_len <= VALUE_LEN_MAX);
+
+        const expected_crc = compute_crc(record, timestamp, key_len, value_len);
+
+        if (crc != expected_crc) {
+            return error.CRCMismatch;
+        }
+    }
+
+    pub fn deserialize(reader: anytype, allocator: std.mem.Allocator) error{ CRCMismatch, EndOfStream, OutOfMemory }!Record {
+        const crc = try reader.readInt(u32, .little);
+        const timestamp = try reader.readInt(i64, .little);
+        const key_len: i32 = try reader.readInt(i32, .little);
+        std.debug.assert(key_len >= KEY_LEN_MIN);
+        std.debug.assert(key_len <= KEY_LEN_MAX);
+
+        var key_buf: ?[]u8 = null;
+        if (key_len > 0) {
+            key_buf = try allocator.alloc(u8, @intCast(key_len));
+            if (key_buf) |kb| try reader.readNoEof(kb);
+        }
+
+        const value_len: i32 = try reader.readInt(i32, .little);
+        std.debug.assert(value_len >= VALUE_LEN_MIN);
+        std.debug.assert(value_len <= VALUE_LEN_MAX);
+
+        const value_buf = try allocator.alloc(u8, @intCast(value_len));
+        try reader.readNoEof(value_buf);
+
+        const record = Record{ .key = key_buf, .value = value_buf };
+
+        try verify_crc(crc, timestamp, record);
+
+        return record;
     }
 };
 
@@ -111,4 +198,66 @@ test "OnDisk.serialize" {
     const expected_crc = crc_hasher.final();
 
     try std.testing.expectEqual(expected_crc, crc);
+}
+
+test "OnDisk.serialize and OnDisk.deserialize" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const allocator = arena.allocator();
+
+    var buffer: std.ArrayList(u8) = .empty;
+    defer buffer.deinit(allocator);
+
+    {
+        // Test with key
+        const record_with_key = Record{ .key = "my-key", .value = "my-value" };
+        try OnDisk.serialize(record_with_key, buffer.writer(allocator));
+
+        var stream = std.io.fixedBufferStream(buffer.items);
+        var reader = stream.reader();
+        const deserialized_with_key = try OnDisk.deserialize(&reader, allocator);
+
+        try std.testing.expect(std.mem.eql(u8, deserialized_with_key.key.?, record_with_key.key.?));
+        try std.testing.expect(std.mem.eql(u8, deserialized_with_key.value, record_with_key.value));
+    }
+
+    // reset buffer without free, will overwrite data for next test
+    buffer.items.len = 0;
+
+    {
+        // Test without key
+        const record_no_key = Record{ .key = null, .value = "value-only" };
+        try OnDisk.serialize(record_no_key, buffer.writer(allocator));
+
+        var stream_no_key = std.io.fixedBufferStream(buffer.items);
+        var reader_no_key = stream_no_key.reader();
+        const deserialized_no_key = try OnDisk.deserialize(&reader_no_key, allocator);
+        // defer allocator.free(deserialized_no_key.value);
+
+        try std.testing.expect(deserialized_no_key.key == null);
+        try std.testing.expect(std.mem.eql(u8, deserialized_no_key.value, record_no_key.value));
+    }
+}
+
+test "OnDisk.deserialize with CRC mismatch" {
+    // Use an ArenaAllocator to contain the memory leak within this test.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var buffer: std.ArrayList(u8) = .empty;
+    defer buffer.deinit(allocator);
+
+    const record = Record{ .key = "key", .value = "value" };
+    try OnDisk.serialize(record, buffer.writer(allocator));
+
+    // Tamper with the buffer. Flip a bit in the value.
+    buffer.items[25] ^= 0x01;
+
+    var stream = std.io.fixedBufferStream(buffer.items);
+    var reader = stream.reader();
+    const err = OnDisk.deserialize(&reader, allocator);
+
+    try std.testing.expectError(error.CRCMismatch, err);
 }
