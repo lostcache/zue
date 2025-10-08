@@ -8,7 +8,7 @@ const std = @import("std");
 /// | Key Length   | `i32`        | 4            |
 /// | Key          | `[]const u8` | >=0, <=256   |
 /// | Value Length | `i32`        | 4            |
-/// | Value        | `[]const u8` | >0, <=65536  |
+/// | Value        | `[]const u8` | >=1, <=65536  |
 const KEY_LEN_MAX = 256;
 const KEY_LEN_MIN = 0;
 const VALUE_LEN_MAX = 65536;
@@ -81,7 +81,7 @@ pub const OnDisk = struct {
 
         try writer.writeInt(i32, value_len, .little);
 
-        std.debug.assert(record.value.len > VALUE_LEN_MIN);
+        std.debug.assert(record.value.len >= VALUE_LEN_MIN);
         std.debug.assert(record.value.len <= VALUE_LEN_MAX);
 
         try writer.writeAll(record.value);
