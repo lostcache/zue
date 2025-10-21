@@ -27,6 +27,47 @@ pub const Record = struct {
 };
 
 pub const OnDisk = struct {
+    records_file: std.fs.File,
+    records_file_name: []const u8,
+
+    fn getAllocFilePath(gpa_alloc: std.mem.Allocator, base_path: []const u8, offset: u64) ![]u8 {
+        return std.fmt.allocPrint(gpa_alloc, "{s}/{d:0>20}", .{ base_path, offset });
+    }
+
+    pub fn create(base_path: []const u8, gpa_alloc: std.mem.Allocator, offset: u64) !OnDisk {
+        const file_path = try OnDisk.getAllocFilePath(gpa_alloc, base_path, offset);
+        errdefer gpa_alloc.free(file_path);
+
+        const file = try std.fs.cwd().createFile(file_path, .{ .truncate = true, .read = true });
+
+        return OnDisk{
+            .records_file = file,
+            .records_file_name = file_path,
+        };
+    }
+
+    pub fn open(base_path: []const u8, gpa_alloc: std.mem.Allocator, offset: u64) !OnDisk {
+        const file_path = try OnDisk.getAllocFilePath(gpa_alloc, base_path, offset);
+        errdefer gpa_alloc.free(file_path);
+
+        const file = try std.fs.cwd().openFile(file_path, .{ .mode = .read_write });
+
+        return OnDisk{
+            .records_file = file,
+            .records_file_name = file_path,
+        };
+    }
+
+    pub fn close(self: *OnDisk) void {
+        self.records_file.close();
+    }
+
+    pub fn delete(self: *OnDisk, gpa_alloc: std.mem.Allocator) !void {
+        self.records_file.close();
+        try std.fs.cwd().deleteFile(self.records_file_name);
+        gpa_alloc.free(self.records_file_name);
+    }
+
     pub fn serializedSize(record: Record) usize {
         var size: usize = 0;
         size += RECORD_HEADER_SIZE;
@@ -44,7 +85,7 @@ pub const OnDisk = struct {
         return size;
     }
 
-    fn compute_crc(record: Record, timestamp: i64, key_len: i32, value_len: i32) u32 {
+    fn computeCRC(record: Record, timestamp: i64, key_len: i32, value_len: i32) u32 {
         var crc_hasher = std.hash.Crc32.init();
 
         crc_hasher.update(std.mem.toBytes(timestamp)[0..]);
@@ -67,10 +108,17 @@ pub const OnDisk = struct {
         return crc_hasher.final();
     }
 
-    fn write_serialized(writer: anytype, crc: u32, timestamp: i64, key_len: i32, value_len: i32, record: Record) !void {
-        try writer.writeInt(u32, crc, .little);
-        try writer.writeInt(i64, timestamp, .little);
-        try writer.writeInt(i32, key_len, .little);
+    fn writeSerialized(writer: anytype, crc: u32, timestamp: i64, key_len: i32, value_len: i32, record: Record) !void {
+        var buf: [4]u8 = undefined;
+        std.mem.writeInt(u32, &buf, crc, .little);
+        try writer.writeAll(&buf);
+
+        var buf8: [8]u8 = undefined;
+        std.mem.writeInt(i64, &buf8, timestamp, .little);
+        try writer.writeAll(&buf8);
+
+        std.mem.writeInt(i32, &buf, key_len, .little);
+        try writer.writeAll(&buf);
 
         if (record.key) |k| {
             std.debug.assert(k.len >= KEY_LEN_MIN);
@@ -79,7 +127,8 @@ pub const OnDisk = struct {
             try writer.writeAll(k);
         }
 
-        try writer.writeInt(i32, value_len, .little);
+        std.mem.writeInt(i32, &buf, value_len, .little);
+        try writer.writeAll(&buf);
 
         std.debug.assert(record.value.len >= VALUE_LEN_MIN);
         std.debug.assert(record.value.len <= VALUE_LEN_MAX);
@@ -97,12 +146,12 @@ pub const OnDisk = struct {
         std.debug.assert(value_len >= VALUE_LEN_MIN);
         std.debug.assert(value_len <= VALUE_LEN_MAX);
 
-        const crc = compute_crc(record, timestamp, key_len, value_len);
+        const crc = computeCRC(record, timestamp, key_len, value_len);
 
-        try write_serialized(writer, crc, timestamp, key_len, value_len, record);
+        try writeSerialized(writer, crc, timestamp, key_len, value_len, record);
     }
 
-    fn verify_crc(crc: u32, timestamp: i64, record: Record) error{CRCMismatch}!void {
+    fn verifyCRC(crc: u32, timestamp: i64, record: Record) error{CRCMismatch}!void {
         const key_len: i32 = if (record.key) |k| @intCast(k.len) else 0;
         std.debug.assert(key_len >= KEY_LEN_MIN);
         std.debug.assert(key_len <= KEY_LEN_MAX);
@@ -111,36 +160,46 @@ pub const OnDisk = struct {
         std.debug.assert(value_len >= VALUE_LEN_MIN);
         std.debug.assert(value_len <= VALUE_LEN_MAX);
 
-        const expected_crc = compute_crc(record, timestamp, key_len, value_len);
+        const expected_crc = computeCRC(record, timestamp, key_len, value_len);
 
         if (crc != expected_crc) {
             return error.CRCMismatch;
         }
     }
 
-    pub fn deserialize(reader: anytype, allocator: std.mem.Allocator) error{ CRCMismatch, EndOfStream, OutOfMemory }!Record {
-        const crc = try reader.readInt(u32, .little);
-        const timestamp = try reader.readInt(i64, .little);
-        const key_len: i32 = try reader.readInt(i32, .little);
+    pub fn deserialize(reader: anytype, allocator: std.mem.Allocator) !Record {
+        var buf: [4]u8 = undefined;
+        _ = try reader.readAll(&buf);
+        const crc = std.mem.readInt(u32, &buf, .little);
+
+        var buf8: [8]u8 = undefined;
+        _ = try reader.readAll(&buf8);
+        const timestamp = std.mem.readInt(i64, &buf8, .little);
+
+        _ = try reader.readAll(&buf);
+        const key_len: i32 = std.mem.readInt(i32, &buf, .little);
         std.debug.assert(key_len >= KEY_LEN_MIN);
         std.debug.assert(key_len <= KEY_LEN_MAX);
 
         var key_buf: ?[]u8 = null;
         if (key_len > 0) {
             key_buf = try allocator.alloc(u8, @intCast(key_len));
-            if (key_buf) |kb| try reader.readNoEof(kb);
+            if (key_buf) |kb| {
+                _ = try reader.readAll(kb);
+            }
         }
 
-        const value_len: i32 = try reader.readInt(i32, .little);
+        _ = try reader.readAll(&buf);
+        const value_len: i32 = std.mem.readInt(i32, &buf, .little);
         std.debug.assert(value_len >= VALUE_LEN_MIN);
         std.debug.assert(value_len <= VALUE_LEN_MAX);
 
         const value_buf = try allocator.alloc(u8, @intCast(value_len));
-        try reader.readNoEof(value_buf);
+        _ = try reader.readAll(value_buf);
 
         const record = Record{ .key = key_buf, .value = value_buf };
 
-        try verify_crc(crc, timestamp, record);
+        try verifyCRC(crc, timestamp, record);
 
         return record;
     }
@@ -215,8 +274,8 @@ test "OnDisk.serialize and OnDisk.deserialize" {
         try OnDisk.serialize(record_with_key, buffer.writer(allocator));
 
         var stream = std.io.fixedBufferStream(buffer.items);
-        var reader = stream.reader();
-        const deserialized_with_key = try OnDisk.deserialize(&reader, allocator);
+        const reader = stream.reader();
+        const deserialized_with_key = try OnDisk.deserialize(reader, allocator);
 
         try std.testing.expect(std.mem.eql(u8, deserialized_with_key.key.?, record_with_key.key.?));
         try std.testing.expect(std.mem.eql(u8, deserialized_with_key.value, record_with_key.value));
@@ -231,8 +290,8 @@ test "OnDisk.serialize and OnDisk.deserialize" {
         try OnDisk.serialize(record_no_key, buffer.writer(allocator));
 
         var stream_no_key = std.io.fixedBufferStream(buffer.items);
-        var reader_no_key = stream_no_key.reader();
-        const deserialized_no_key = try OnDisk.deserialize(&reader_no_key, allocator);
+        const reader_no_key = stream_no_key.reader();
+        const deserialized_no_key = try OnDisk.deserialize(reader_no_key, allocator);
         // defer allocator.free(deserialized_no_key.value);
 
         try std.testing.expect(deserialized_no_key.key == null);
@@ -256,8 +315,73 @@ test "OnDisk.deserialize with CRC mismatch" {
     buffer.items[25] ^= 0x01;
 
     var stream = std.io.fixedBufferStream(buffer.items);
-    var reader = stream.reader();
-    const err = OnDisk.deserialize(&reader, allocator);
+    const reader = stream.reader();
+    const err = OnDisk.deserialize(reader, allocator);
 
     try std.testing.expectError(error.CRCMismatch, err);
+}
+
+test "OnDisk.create and OnDisk.delete" {
+    const test_dir = "test_records";
+    const test_offset: u64 = 12345;
+
+    // Create test directory
+    std.fs.cwd().makeDir(test_dir) catch |err| {
+        if (err != error.PathAlreadyExists) return err;
+    };
+    defer std.fs.cwd().deleteTree(test_dir) catch {};
+
+    // Test create
+    var ondisk = try OnDisk.create(test_dir, std.testing.allocator, test_offset);
+
+    // Verify file was created with correct name (20 chars, zero-padded)
+    const expected_name = "test_records/00000000000000012345";
+    try std.testing.expectEqualStrings(expected_name, ondisk.records_file_name);
+
+    // Test delete
+    try ondisk.delete(std.testing.allocator);
+
+    // Verify file was deleted
+    if (std.fs.cwd().openFile(expected_name, .{})) |file| {
+        file.close();
+        return error.TestExpectedFileToBeDeleted;
+    } else |err| {
+        if (err != error.FileNotFound) return err;
+    }
+}
+
+test "OnDisk.open and OnDisk.close" {
+    const test_dir = "test_records_open";
+    const test_offset: u64 = 67890;
+
+    // Create test directory
+    std.fs.cwd().makeDir(test_dir) catch |err| {
+        if (err != error.PathAlreadyExists) return err;
+    };
+    defer std.fs.cwd().deleteTree(test_dir) catch {};
+
+    // Create a file first
+    var ondisk1 = try OnDisk.create(test_dir, std.testing.allocator, test_offset);
+    defer std.testing.allocator.free(ondisk1.records_file_name);
+
+    // Write some data
+    const record = Record{ .key = "test_key", .value = "test_value" };
+    try OnDisk.serialize(record, ondisk1.records_file);
+
+    // Close the file
+    ondisk1.close();
+
+    // Now open it again
+    var ondisk2 = try OnDisk.open(test_dir, std.testing.allocator, test_offset);
+    defer std.testing.allocator.free(ondisk2.records_file_name);
+    defer ondisk2.close();
+
+    // Verify we can read the data
+    try ondisk2.records_file.seekTo(0);
+    const deserialized = try OnDisk.deserialize(ondisk2.records_file, std.testing.allocator);
+    defer std.testing.allocator.free(deserialized.value);
+    defer if (deserialized.key) |k| std.testing.allocator.free(k);
+
+    try std.testing.expectEqualStrings("test_key", deserialized.key.?);
+    try std.testing.expectEqualStrings("test_value", deserialized.value);
 }
