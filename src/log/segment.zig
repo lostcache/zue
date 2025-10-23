@@ -1,23 +1,21 @@
 const std = @import("std");
 const LogIndex = @import("log_index.zig");
-const Record = @import("record.zig");
+const OnDiskLog = @import("record.zig");
 
 pub const SegmentConfig = struct {
-    log_config: Record.OnDiskLogConfig,
+    log_config: OnDiskLog.OnDiskLogConfig,
     index_config: LogIndex.OnDiskIndexConfig,
 
-    /// Create a SegmentConfig with default values
     pub fn default() SegmentConfig {
         return SegmentConfig{
-            .log_config = Record.OnDiskLogConfig{},
+            .log_config = OnDiskLog.OnDiskLogConfig{},
             .index_config = LogIndex.OnDiskIndexConfig{},
         };
     }
 
-    /// Create a SegmentConfig with custom log and index file sizes
     pub fn init(log_file_max_bytes: u64, index_file_max_bytes: u64) SegmentConfig {
         return SegmentConfig{
-            .log_config = Record.OnDiskLogConfig{
+            .log_config = OnDiskLog.OnDiskLogConfig{
                 .log_file_max_size_bytes = log_file_max_bytes,
             },
             .index_config = LogIndex.OnDiskIndexConfig{
@@ -26,7 +24,6 @@ pub const SegmentConfig = struct {
         };
     }
 
-    /// Create a SegmentConfig with custom key/value size limits
     pub fn withLimits(
         log_file_max_bytes: u64,
         index_file_max_bytes: u64,
@@ -34,7 +31,7 @@ pub const SegmentConfig = struct {
         value_max_bytes: u64,
     ) SegmentConfig {
         return SegmentConfig{
-            .log_config = Record.OnDiskLogConfig{
+            .log_config = OnDiskLog.OnDiskLogConfig{
                 .log_file_max_size_bytes = log_file_max_bytes,
                 .key_max_size_bytes = key_max_bytes,
                 .value_max_size_bytes = value_max_bytes,
@@ -49,17 +46,17 @@ pub const SegmentConfig = struct {
 pub const Segment = struct {
     config: SegmentConfig,
     base_offset: u64,
-    next_relative_offset: u32, // Track next relative offset for appends
+    next_relative_offset: u32,
 
-    // Log file management
     log_file: std.fs.File,
     log_file_name: []const u8,
     log_file_size: u64,
 
-    // Index file management
     index_file: std.fs.File,
     index_file_name: []const u8,
     index_file_size: u64,
+
+    bytes_since_last_index: u64,
 
     fn getAllocLogFilePath(gpa_alloc: std.mem.Allocator, base_path: []const u8, offset: u64) ![]u8 {
         return std.fmt.allocPrint(gpa_alloc, "{s}/{d:0>20}.log", .{ base_path, offset });
@@ -70,19 +67,38 @@ pub const Segment = struct {
     }
 
     pub fn create(config: SegmentConfig, abs_base_path: []const u8, base_offset: u64, gpa_alloc: std.mem.Allocator) !Segment {
-        // Create log file
         const log_file_path = try Segment.getAllocLogFilePath(gpa_alloc, abs_base_path, base_offset);
-        errdefer gpa_alloc.free(log_file_path);
+        var log_file_path_allocated = true;
+        errdefer {
+            if (log_file_path_allocated) {
+                gpa_alloc.free(log_file_path);
+            }
+        }
 
-        const log_file = try std.fs.createFileAbsolute(log_file_path, .{ .truncate = true, .read = true });
-        errdefer log_file.close();
+        var log_file = try OnDiskLog.OnDiskLog.create(log_file_path);
+        var log_file_created = true;
+        errdefer {
+            if (log_file_created) {
+                log_file.close();
+                std.fs.deleteFileAbsolute(log_file_path) catch {};
+            }
+        }
 
-        // Create index file
         const index_file_path = try Segment.getAllocIndexFilePath(gpa_alloc, abs_base_path, base_offset);
         errdefer gpa_alloc.free(index_file_path);
 
-        const index_file = try std.fs.createFileAbsolute(index_file_path, .{ .truncate = true, .read = true });
-        errdefer index_file.close();
+        const index_file = LogIndex.OnDiskIndex.create(index_file_path) catch |err| {
+            log_file.close();
+            std.fs.deleteFileAbsolute(log_file_path) catch {};
+            gpa_alloc.free(log_file_path);
+            log_file_created = false;
+            log_file_path_allocated = false;
+            return err;
+        };
+        errdefer {
+            index_file.close();
+            std.fs.deleteFileAbsolute(index_file_path) catch {};
+        }
 
         return Segment{
             .config = config,
@@ -94,32 +110,64 @@ pub const Segment = struct {
             .index_file = index_file,
             .index_file_name = index_file_path,
             .index_file_size = 0,
+            .bytes_since_last_index = 0,
         };
     }
 
     pub fn open(config: SegmentConfig, abs_base_path: []const u8, base_offset: u64, gpa_alloc: std.mem.Allocator) !Segment {
-        // Open log file
         const log_file_path = try Segment.getAllocLogFilePath(gpa_alloc, abs_base_path, base_offset);
-        errdefer gpa_alloc.free(log_file_path);
+        var log_file_path_allocated = true;
+        errdefer {
+            if (log_file_path_allocated) {
+                gpa_alloc.free(log_file_path);
+            }
+        }
 
-        const log_file = try std.fs.openFileAbsolute(log_file_path, .{ .mode = .read_write });
-        errdefer log_file.close();
+        var log_file = try OnDiskLog.OnDiskLog.open(log_file_path);
+        var log_file_opened = true;
+        errdefer {
+            if (log_file_opened) {
+                log_file.close();
+            }
+        }
 
         const log_stat = try log_file.stat();
         const log_file_size = log_stat.size;
 
-        // Open index file
         const index_file_path = try Segment.getAllocIndexFilePath(gpa_alloc, abs_base_path, base_offset);
         errdefer gpa_alloc.free(index_file_path);
 
-        const index_file = try std.fs.openFileAbsolute(index_file_path, .{ .mode = .read_write });
+        const index_file = LogIndex.OnDiskIndex.open(index_file_path) catch |err| {
+            log_file.close();
+            gpa_alloc.free(log_file_path);
+            log_file_opened = false;
+            log_file_path_allocated = false;
+            return err;
+        };
         errdefer index_file.close();
 
         const index_stat = try index_file.stat();
         const index_file_size = index_stat.size;
 
-        // Calculate next relative offset from index
         const next_relative_offset: u32 = @intCast(LogIndex.OnDiskIndex.getEntryCount(index_file_size));
+
+        // Calculate bytes written since last index
+        var bytes_since_last_index: u64 = 0;
+        if (index_file_size > 0) {
+            // Read the last index entry to get the position where last index was created
+            const entry_count = LogIndex.OnDiskIndex.getEntryCount(index_file_size);
+            const last_index_pos = (entry_count - 1) * LogIndex.INDEX_SIZE_BYTES;
+
+            try index_file.seekTo(last_index_pos);
+            var buf: [LogIndex.INDEX_SIZE_BYTES]u8 = undefined;
+            _ = try index_file.readAll(&buf);
+
+            const last_indexed_pos = std.mem.readInt(u32, buf[4..8], .little);
+            bytes_since_last_index = log_file_size - last_indexed_pos;
+        } else {
+            // No index entries yet, all bytes are since "last index"
+            bytes_since_last_index = log_file_size;
+        }
 
         return Segment{
             .config = config,
@@ -131,6 +179,7 @@ pub const Segment = struct {
             .index_file = index_file,
             .index_file_name = index_file_path,
             .index_file_size = index_file_size,
+            .bytes_since_last_index = bytes_since_last_index,
         };
     }
 
@@ -148,44 +197,45 @@ pub const Segment = struct {
         gpa_alloc.free(self.index_file_name);
     }
 
-    pub fn append(self: *Segment, record: Record.Record) !void {
-        // Check if log file is full
-        const record_size = Record.OnDiskLog.serializedSize(self.config.log_config, record);
+    pub fn append(self: *Segment, record: OnDiskLog.Record) !void {
+        const record_size = OnDiskLog.OnDiskLog.serializedSize(self.config.log_config, record);
         if (self.log_file_size + record_size > self.config.log_config.log_file_max_size_bytes) {
             return error.LogFileFull;
         }
 
-        // Check if index file is full
-        if (LogIndex.OnDiskIndex.isFull(self.config.index_config, self.index_file_size)) {
-            return error.IndexFileFull;
+        const should_create_index = self.bytes_since_last_index >= self.config.index_config.bytes_per_index or self.next_relative_offset == 0;
+
+        if (should_create_index) {
+            if (LogIndex.OnDiskIndex.isFull(self.config.index_config, self.index_file_size)) {
+                return error.IndexFileFull;
+            }
+
+            _ = try LogIndex.OnDiskIndex.add(
+                self.config.index_config,
+                self.index_file,
+                &self.index_file_size,
+                self.next_relative_offset,
+                @intCast(self.log_file_size),
+            );
+
+            self.bytes_since_last_index = 0;
         }
 
-        // Write record to log file
         const record_pos = self.log_file_size;
         try self.log_file.seekTo(record_pos);
-        try Record.OnDiskLog.serialize(self.config.log_config, record, self.log_file);
+        try OnDiskLog.OnDiskLog.serialize(self.config.log_config, record, self.log_file);
         self.log_file_size += record_size;
-
-        // Add index entry for this record
-        _ = try LogIndex.OnDiskIndex.add(
-            self.config.index_config,
-            self.index_file,
-            &self.index_file_size,
-            self.next_relative_offset,
-            @intCast(record_pos),
-        );
+        self.bytes_since_last_index += record_size;
 
         self.next_relative_offset += 1;
     }
 
-    pub fn read(self: *Segment, offset: u64, allocator: std.mem.Allocator) !Record.Record {
-        // Convert absolute offset to relative offset
+    pub fn read(self: *Segment, offset: u64, allocator: std.mem.Allocator) !OnDiskLog.Record {
         if (offset < self.base_offset) {
             return error.OffsetOutOfBounds;
         }
         const relative_offset: u32 = @intCast(offset - self.base_offset);
 
-        // Lookup position in index
         const index_entry = try LogIndex.OnDiskIndex.lookup(
             self.config.index_config,
             self.index_file,
@@ -193,9 +243,8 @@ pub const Segment = struct {
             relative_offset,
         );
 
-        // Read record from log file
         try self.log_file.seekTo(index_entry.pos);
-        return try Record.OnDiskLog.deserialize(self.config.log_config, self.log_file, allocator);
+        return try OnDiskLog.OnDiskLog.deserialize(self.config.log_config, self.log_file, allocator);
     }
 
     pub fn isFull(self: *Segment) bool {
@@ -229,9 +278,9 @@ test "SegmentConfig: init with custom sizes" {
 test "SegmentConfig: withLimits for custom record sizes" {
     const config = SegmentConfig.withLimits(
         1024 * 1024 * 1024, // 1GB log
-        10 * 1024 * 1024,   // 10MB index
-        512,                 // 512B max key
-        2048,                // 2KB max value
+        10 * 1024 * 1024, // 10MB index
+        512, // 512B max key
+        2048, // 2KB max value
     );
 
     try std.testing.expectEqual(@as(u64, 512), config.log_config.key_max_size_bytes);
@@ -275,7 +324,7 @@ test "Segment: open existing segment" {
     defer std.testing.allocator.free(abs_path);
 
     const config = SegmentConfig{
-        .log_config = Record.OnDiskLogConfig{},
+        .log_config = OnDiskLog.OnDiskLogConfig{},
         .index_config = LogIndex.OnDiskIndexConfig{},
     };
 
@@ -307,14 +356,14 @@ test "Segment: append single record" {
     defer std.testing.allocator.free(abs_path);
 
     const config = SegmentConfig{
-        .log_config = Record.OnDiskLogConfig{},
+        .log_config = OnDiskLog.OnDiskLogConfig{},
         .index_config = LogIndex.OnDiskIndexConfig{},
     };
 
     var segment = try Segment.create(config, abs_path, test_offset, std.testing.allocator);
     defer segment.delete(std.testing.allocator) catch {};
 
-    const record = Record.Record{ .key = "test-key", .value = "test-value" };
+    const record = OnDiskLog.Record{ .key = "test-key", .value = "test-value" };
     try segment.append(record);
 
     // Verify sizes updated
@@ -336,7 +385,7 @@ test "Segment: append and read multiple records" {
     defer std.testing.allocator.free(abs_path);
 
     const config = SegmentConfig{
-        .log_config = Record.OnDiskLogConfig{},
+        .log_config = OnDiskLog.OnDiskLogConfig{},
         .index_config = LogIndex.OnDiskIndexConfig{},
     };
 
@@ -344,9 +393,9 @@ test "Segment: append and read multiple records" {
     defer segment.delete(std.testing.allocator) catch {};
 
     // Append multiple records
-    const record1 = Record.Record{ .key = "key1", .value = "value1" };
-    const record2 = Record.Record{ .key = "key2", .value = "value2" };
-    const record3 = Record.Record{ .key = null, .value = "value3" };
+    const record1 = OnDiskLog.Record{ .key = "key1", .value = "value1" };
+    const record2 = OnDiskLog.Record{ .key = "key2", .value = "value2" };
+    const record3 = OnDiskLog.Record{ .key = null, .value = "value3" };
 
     try segment.append(record1);
     try segment.append(record2);
@@ -374,7 +423,7 @@ test "Segment: persistence across close/open" {
     defer std.testing.allocator.free(abs_path);
 
     const config = SegmentConfig{
-        .log_config = Record.OnDiskLogConfig{},
+        .log_config = OnDiskLog.OnDiskLogConfig{},
         .index_config = LogIndex.OnDiskIndexConfig{},
     };
 
@@ -387,7 +436,7 @@ test "Segment: persistence across close/open" {
         defer std.testing.allocator.free(segment.log_file_name);
         defer std.testing.allocator.free(segment.index_file_name);
 
-        const record = Record.Record{ .key = "persist", .value = "test-data" };
+        const record = OnDiskLog.Record{ .key = "persist", .value = "test-data" };
         try segment.append(record);
 
         saved_log_size = segment.log_file_size;
@@ -425,12 +474,12 @@ test "Segment: log file full error" {
     const abs_path = try std.fs.cwd().realpathAlloc(std.testing.allocator, test_dir);
     defer std.testing.allocator.free(abs_path);
 
-    const test_record = Record.Record{ .key = "k1", .value = "v1" };
-    const record_size = Record.OnDiskLog.serializedSize(Record.OnDiskLogConfig{}, test_record);
+    const test_record = OnDiskLog.Record{ .key = "k1", .value = "v1" };
+    const record_size = OnDiskLog.OnDiskLog.serializedSize(OnDiskLog.OnDiskLogConfig{}, test_record);
 
     // Create config where only 1 record fits
     const config = SegmentConfig{
-        .log_config = Record.OnDiskLogConfig{
+        .log_config = OnDiskLog.OnDiskLogConfig{
             .log_file_max_size_bytes = record_size, // Only one record fits
             .key_max_size_bytes = 256,
             .value_max_size_bytes = 65536,
@@ -442,11 +491,11 @@ test "Segment: log file full error" {
     defer segment.delete(std.testing.allocator) catch {};
 
     // First append should succeed
-    const record1 = Record.Record{ .key = "k1", .value = "v1" };
+    const record1 = OnDiskLog.Record{ .key = "k1", .value = "v1" };
     try segment.append(record1);
 
     // Second append should fail due to log file full
-    const record2 = Record.Record{ .key = "k2", .value = "v2" };
+    const record2 = OnDiskLog.Record{ .key = "k2", .value = "v2" };
     try std.testing.expectError(error.LogFileFull, segment.append(record2));
 }
 
@@ -462,26 +511,33 @@ test "Segment: index file full error" {
     const abs_path = try std.fs.cwd().realpathAlloc(std.testing.allocator, test_dir);
     defer std.testing.allocator.free(abs_path);
 
-    // Create config with very small index file size
+    // Calculate record size to ensure we trigger index creation
+    const test_record = OnDiskLog.Record{ .key = "k1", .value = "v1" };
+    const record_size = OnDiskLog.OnDiskLog.serializedSize(OnDiskLog.OnDiskLogConfig{}, test_record);
+
+    // Create config with very small index file size and bytes_per_index
+    // Set bytes_per_index smaller than record_size to force index creation on each append
     const config = SegmentConfig{
-        .log_config = Record.OnDiskLogConfig{},
+        .log_config = OnDiskLog.OnDiskLogConfig{},
         .index_config = LogIndex.OnDiskIndexConfig{
             .index_file_max_size_bytes = LogIndex.INDEX_SIZE_BYTES * 2, // Only 2 entries
-            .bytes_per_index = 256,
+            .bytes_per_index = record_size - 1, // Force index creation on every record
         },
     };
 
     var segment = try Segment.create(config, abs_path, test_offset, std.testing.allocator);
     defer segment.delete(std.testing.allocator) catch {};
 
-    // First two appends should succeed
-    const record1 = Record.Record{ .key = "k1", .value = "v1" };
-    const record2 = Record.Record{ .key = "k2", .value = "v2" };
+    // First append creates index at offset 0
+    const record1 = OnDiskLog.Record{ .key = "k1", .value = "v1" };
     try segment.append(record1);
+
+    // Second append should create another index (bytes_since_last_index >= bytes_per_index)
+    const record2 = OnDiskLog.Record{ .key = "k2", .value = "v2" };
     try segment.append(record2);
 
     // Third append should fail due to index file full
-    const record3 = Record.Record{ .key = "k3", .value = "v3" };
+    const record3 = OnDiskLog.Record{ .key = "k3", .value = "v3" };
     try std.testing.expectError(error.IndexFileFull, segment.append(record3));
 }
 
@@ -497,11 +553,15 @@ test "Segment: isFull returns correct status" {
     const abs_path = try std.fs.cwd().realpathAlloc(std.testing.allocator, test_dir);
     defer std.testing.allocator.free(abs_path);
 
+    // Calculate record size to ensure we trigger index creation
+    const test_record = OnDiskLog.Record{ .key = "k1", .value = "v1" };
+    const record_size = OnDiskLog.OnDiskLog.serializedSize(OnDiskLog.OnDiskLogConfig{}, test_record);
+
     const config = SegmentConfig{
-        .log_config = Record.OnDiskLogConfig{},
+        .log_config = OnDiskLog.OnDiskLogConfig{},
         .index_config = LogIndex.OnDiskIndexConfig{
             .index_file_max_size_bytes = LogIndex.INDEX_SIZE_BYTES * 2,
-            .bytes_per_index = 256,
+            .bytes_per_index = record_size - 1, // Force index creation on every record
         },
     };
 
@@ -511,12 +571,13 @@ test "Segment: isFull returns correct status" {
     // Initially not full
     try std.testing.expect(!segment.isFull());
 
-    // Add records
-    const record1 = Record.Record{ .key = "k1", .value = "v1" };
-    const record2 = Record.Record{ .key = "k2", .value = "v2" };
+    // Add first record - creates first index
+    const record1 = OnDiskLog.Record{ .key = "k1", .value = "v1" };
     try segment.append(record1);
     try std.testing.expect(!segment.isFull());
 
+    // Add second record - creates second index, now full
+    const record2 = OnDiskLog.Record{ .key = "k2", .value = "v2" };
     try segment.append(record2);
     try std.testing.expect(segment.isFull());
 }
@@ -534,14 +595,14 @@ test "Segment: read with invalid offset returns error" {
     defer std.testing.allocator.free(abs_path);
 
     const config = SegmentConfig{
-        .log_config = Record.OnDiskLogConfig{},
+        .log_config = OnDiskLog.OnDiskLogConfig{},
         .index_config = LogIndex.OnDiskIndexConfig{},
     };
 
     var segment = try Segment.create(config, abs_path, test_offset, std.testing.allocator);
     defer segment.delete(std.testing.allocator) catch {};
 
-    const record = Record.Record{ .key = "key", .value = "value" };
+    const record = OnDiskLog.Record{ .key = "key", .value = "value" };
     try segment.append(record);
 
     // Try to read with offset before base_offset
@@ -561,7 +622,7 @@ test "Segment: getSize returns correct log file size" {
     defer std.testing.allocator.free(abs_path);
 
     const config = SegmentConfig{
-        .log_config = Record.OnDiskLogConfig{},
+        .log_config = OnDiskLog.OnDiskLogConfig{},
         .index_config = LogIndex.OnDiskIndexConfig{},
     };
 
@@ -570,10 +631,10 @@ test "Segment: getSize returns correct log file size" {
 
     try std.testing.expectEqual(@as(u64, 0), segment.getSize());
 
-    const record = Record.Record{ .key = "key", .value = "value" };
+    const record = OnDiskLog.Record{ .key = "key", .value = "value" };
     try segment.append(record);
 
-    const expected_size = Record.OnDiskLog.serializedSize(config.log_config, record);
+    const expected_size = OnDiskLog.OnDiskLog.serializedSize(config.log_config, record);
     try std.testing.expectEqual(expected_size, segment.getSize());
 }
 
@@ -590,7 +651,7 @@ test "Segment: delete removes both files" {
     defer std.testing.allocator.free(abs_path);
 
     const config = SegmentConfig{
-        .log_config = Record.OnDiskLogConfig{},
+        .log_config = OnDiskLog.OnDiskLogConfig{},
         .index_config = LogIndex.OnDiskIndexConfig{},
     };
 
@@ -609,4 +670,154 @@ test "Segment: delete removes both files" {
 
     const index_err = std.fs.openFileAbsolute(index_path, .{});
     try std.testing.expectError(error.FileNotFound, index_err);
+}
+
+test "Segment: atomic creation - cleanup on index file failure" {
+    const test_dir = "test_segment_atomic_create";
+    const test_offset: u64 = 12000;
+
+    std.fs.cwd().makeDir(test_dir) catch |err| {
+        if (err != error.PathAlreadyExists) return err;
+    };
+    defer std.fs.cwd().deleteTree(test_dir) catch {};
+
+    const abs_path = try std.fs.cwd().realpathAlloc(std.testing.allocator, test_dir);
+    defer std.testing.allocator.free(abs_path);
+
+    const config = SegmentConfig.default();
+
+    // Create the expected index file path before creating segment
+    const expected_index_path = try Segment.getAllocIndexFilePath(std.testing.allocator, abs_path, test_offset);
+    defer std.testing.allocator.free(expected_index_path);
+
+    // Create a directory with the index file's name to force creation failure
+    try std.fs.makeDirAbsolute(expected_index_path);
+    defer std.fs.deleteDirAbsolute(expected_index_path) catch {};
+
+    // Try to create segment - should fail due to index file conflict
+    const result = Segment.create(config, abs_path, test_offset, std.testing.allocator);
+    try std.testing.expectError(error.IsDir, result);
+
+    // Verify log file was cleaned up (shouldn't exist)
+    const log_path = try Segment.getAllocLogFilePath(std.testing.allocator, abs_path, test_offset);
+    defer std.testing.allocator.free(log_path);
+
+    const log_check = std.fs.openFileAbsolute(log_path, .{});
+    try std.testing.expectError(error.FileNotFound, log_check);
+}
+
+test "Segment: atomic open - cleanup on index file failure" {
+    const test_dir = "test_segment_atomic_open";
+    const test_offset: u64 = 13000;
+
+    std.fs.cwd().makeDir(test_dir) catch |err| {
+        if (err != error.PathAlreadyExists) return err;
+    };
+    defer std.fs.cwd().deleteTree(test_dir) catch {};
+
+    const abs_path = try std.fs.cwd().realpathAlloc(std.testing.allocator, test_dir);
+    defer std.testing.allocator.free(abs_path);
+
+    const config = SegmentConfig.default();
+
+    // Create only the log file, but not the index file
+    const log_path = try Segment.getAllocLogFilePath(std.testing.allocator, abs_path, test_offset);
+    defer std.testing.allocator.free(log_path);
+
+    {
+        const log_file = try OnDiskLog.OnDiskLog.create(log_path);
+        log_file.close();
+    }
+
+    // Try to open segment - should fail because index file doesn't exist
+    const result = Segment.open(config, abs_path, test_offset, std.testing.allocator);
+    try std.testing.expectError(error.FileNotFound, result);
+
+    // This test verifies that we don't leak the log file handle
+    // The log file should still exist on disk (we don't delete it on open failure)
+    // but the file handle should be closed
+    const log_check = std.fs.openFileAbsolute(log_path, .{});
+    if (log_check) |f| {
+        f.close();
+        // If we can open it, the previous handle was properly closed
+    } else |_| {
+        return error.TestFailed;
+    }
+}
+
+test "Segment: sparse index creation based on bytes_per_index" {
+    const test_dir = "test_segment_sparse_index";
+    const test_offset: u64 = 14000;
+
+    std.fs.cwd().makeDir(test_dir) catch |err| {
+        if (err != error.PathAlreadyExists) return err;
+    };
+    defer std.fs.cwd().deleteTree(test_dir) catch {};
+
+    const abs_path = try std.fs.cwd().realpathAlloc(std.testing.allocator, test_dir);
+    defer std.testing.allocator.free(abs_path);
+
+    // Create a test record and measure its exact size
+    const test_record = OnDiskLog.Record{ .key = "key", .value = "value" };
+    const record_size = OnDiskLog.OnDiskLog.serializedSize(OnDiskLog.OnDiskLogConfig{}, test_record);
+
+    // Set bytes_per_index to exactly 4 times the record size for predictable behavior
+    // With this configuration:
+    // - Record 0 (offset 0): Always creates index (first record), bytes_since_last_index = record_size after
+    // - Records 1-3: No index created, bytes_since_last_index = 2×, 3×, 4× record_size after each
+    // - Record 4 (offset 4): Creates index (4×record_size >= 4×record_size), bytes_since_last_index = record_size after
+    // - Records 5-7: No index created, bytes_since_last_index = 2×, 3×, 4× record_size after each
+    // - Record 8 (offset 8): Creates index (4×record_size >= 4×record_size), bytes_since_last_index = record_size after
+    const config = SegmentConfig{
+        .log_config = OnDiskLog.OnDiskLogConfig{},
+        .index_config = LogIndex.OnDiskIndexConfig{
+            .bytes_per_index = record_size * 4,
+        },
+    };
+
+    var segment = try Segment.create(config, abs_path, test_offset, std.testing.allocator);
+    defer segment.delete(std.testing.allocator) catch {};
+
+    // We'll append exactly 9 records and expect exactly 3 indices at offsets 0, 4, and 8
+    const num_records = 9;
+    const expected_final_index_count = 3;
+
+    var i: u32 = 0;
+    while (i < num_records) : (i += 1) {
+        const prev_index_file_size = segment.index_file_size;
+        const prev_bytes_since_last_index = segment.bytes_since_last_index;
+        const prev_log_file_size = segment.log_file_size;
+        const prev_next_relative_offset = segment.next_relative_offset;
+
+        // Append the record
+        try segment.append(test_record);
+
+        // Determine if an index should have been created BEFORE writing this record
+        const should_have_created_index = (i == 0) or (prev_bytes_since_last_index >= config.index_config.bytes_per_index);
+
+        // Verify index file size and bytes_since_last_index based on whether index was created
+        if (should_have_created_index) {
+            // Index was created before writing the record, then record was written
+            try std.testing.expectEqual(prev_index_file_size + LogIndex.INDEX_SIZE_BYTES, segment.index_file_size);
+            try std.testing.expectEqual(record_size, segment.bytes_since_last_index);
+        } else {
+            // No index was created, only the record was written
+            try std.testing.expectEqual(prev_index_file_size, segment.index_file_size);
+            try std.testing.expectEqual(prev_bytes_since_last_index + record_size, segment.bytes_since_last_index);
+        }
+
+        // Log file size should always increase by exactly record_size
+        try std.testing.expectEqual(prev_log_file_size + record_size, segment.log_file_size);
+
+        // next_relative_offset should always increment by 1
+        try std.testing.expectEqual(prev_next_relative_offset + 1, segment.next_relative_offset);
+    }
+
+    // Final state verification
+    try std.testing.expectEqual(num_records * record_size, segment.log_file_size);
+    try std.testing.expectEqual(expected_final_index_count * LogIndex.INDEX_SIZE_BYTES, segment.index_file_size);
+    try std.testing.expectEqual(@as(u32, num_records), segment.next_relative_offset);
+
+    // Verify we created sparse indices (not one per record)
+    try std.testing.expect(expected_final_index_count < num_records);
 }

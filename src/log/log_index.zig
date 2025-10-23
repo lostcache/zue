@@ -1,12 +1,10 @@
 const std = @import("std");
 
-// True constants - index entry size
 const INDEX_RELATIVE_OFFSET_HOLDER_BYTES = @sizeOf(u32);
 const INDEX_POS_HOLDER_BYTES = @sizeOf(u32);
 const INDEX_CRC_HOLDER_BYTES = @sizeOf(u32);
 pub const INDEX_SIZE_BYTES = INDEX_RELATIVE_OFFSET_HOLDER_BYTES + INDEX_POS_HOLDER_BYTES + INDEX_CRC_HOLDER_BYTES;
 
-// Configurable limits for on-disk index
 pub const OnDiskIndexConfig = struct {
     index_file_max_size_bytes: u64 = 1024 * 1024 * 10, // 10 MB
     bytes_per_index: u64 = 1024 * 4, // 4 KB
@@ -44,8 +42,15 @@ pub const Index = struct {
     }
 };
 
-// OnDiskIndex - Stateless namespace for index file operations
 pub const OnDiskIndex = struct {
+    pub fn create(file_path: []const u8) !std.fs.File {
+        return try std.fs.createFileAbsolute(file_path, .{ .truncate = true, .read = true });
+    }
+
+    pub fn open(file_path: []const u8) !std.fs.File {
+        return try std.fs.openFileAbsolute(file_path, .{ .mode = .read_write });
+    }
+
     pub fn add(config: OnDiskIndexConfig, file: std.fs.File, current_size: *u64, relative_offset: u32, pos: u32) !Index {
         if (current_size.* + INDEX_SIZE_BYTES > config.index_file_max_size_bytes) {
             return error.IndexFileFull;
@@ -481,4 +486,92 @@ test "OnDiskIndex: serialization correctness - little endian with CRC" {
     try std.testing.expectEqual(@as(u32, test_relative_offset), relative_offset);
     try std.testing.expectEqual(@as(u32, test_pos), pos);
     try std.testing.expectEqual(index.crc32, crc32);
+}
+
+test "OnDiskIndex.create creates new index file" {
+    const test_dir = "test_ondiskindex_create";
+    std.fs.cwd().makeDir(test_dir) catch |err| {
+        if (err != error.PathAlreadyExists) return err;
+    };
+    defer std.fs.cwd().deleteTree(test_dir) catch {};
+
+    const abs_path = try std.fs.cwd().realpathAlloc(std.testing.allocator, test_dir);
+    defer std.testing.allocator.free(abs_path);
+
+    const file_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/test.index", .{abs_path});
+    defer std.testing.allocator.free(file_path);
+
+    // Create file
+    const file = try OnDiskIndex.create(file_path);
+    defer file.close();
+
+    // Verify file exists and is empty
+    const stat = try file.stat();
+    try std.testing.expectEqual(@as(u64, 0), stat.size);
+
+    // Verify we can write to it
+    var buf: [INDEX_SIZE_BYTES]u8 = undefined;
+    std.mem.writeInt(u32, buf[0..4], 0, .little);
+    std.mem.writeInt(u32, buf[4..8], 100, .little);
+    std.mem.writeInt(u32, buf[8..12], 0xDEADBEEF, .little);
+    try file.writeAll(&buf);
+
+    const stat2 = try file.stat();
+    try std.testing.expectEqual(INDEX_SIZE_BYTES, stat2.size);
+}
+
+test "OnDiskIndex.open opens existing index file" {
+    const test_dir = "test_ondiskindex_open";
+    std.fs.cwd().makeDir(test_dir) catch |err| {
+        if (err != error.PathAlreadyExists) return err;
+    };
+    defer std.fs.cwd().deleteTree(test_dir) catch {};
+
+    const abs_path = try std.fs.cwd().realpathAlloc(std.testing.allocator, test_dir);
+    defer std.testing.allocator.free(abs_path);
+
+    const file_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/test.index", .{abs_path});
+    defer std.testing.allocator.free(file_path);
+
+    // Create file and write some index entries
+    {
+        const file = try OnDiskIndex.create(file_path);
+        defer file.close();
+
+        const config = OnDiskIndexConfig{};
+        var current_size: u64 = 0;
+        _ = try OnDiskIndex.add(config, file, &current_size, 0, 0);
+        _ = try OnDiskIndex.add(config, file, &current_size, 10, 1024);
+    }
+
+    // Open existing file
+    const file = try OnDiskIndex.open(file_path);
+    defer file.close();
+
+    // Verify file contains existing entries (2 entries)
+    const stat = try file.stat();
+    try std.testing.expectEqual(INDEX_SIZE_BYTES * 2, stat.size);
+
+    // Verify we can read from it
+    const config = OnDiskIndexConfig{};
+    const index = try OnDiskIndex.lookup(config, file, stat.size, 10);
+    try std.testing.expectEqual(@as(u32, 10), index.relative_offset);
+    try std.testing.expectEqual(@as(u32, 1024), index.pos);
+}
+
+test "OnDiskIndex.open returns error for non-existent file" {
+    const test_dir = "test_ondiskindex_open_error";
+    std.fs.cwd().makeDir(test_dir) catch |err| {
+        if (err != error.PathAlreadyExists) return err;
+    };
+    defer std.fs.cwd().deleteTree(test_dir) catch {};
+
+    const abs_path = try std.fs.cwd().realpathAlloc(std.testing.allocator, test_dir);
+    defer std.testing.allocator.free(abs_path);
+
+    const file_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/nonexistent.index", .{abs_path});
+    defer std.testing.allocator.free(file_path);
+
+    // Try to open non-existent file
+    try std.testing.expectError(error.FileNotFound, OnDiskIndex.open(file_path));
 }

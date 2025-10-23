@@ -10,7 +10,6 @@ const std = @import("std");
 /// | Value Length | `i32`        | 4            |
 /// | Value        | `[]const u8` | configurable |
 
-// True constants - these never change (header field sizes)
 const CRC = @sizeOf(u32);
 const TIMESTAMP = @sizeOf(i64);
 const KEY_LEN_HOLDER = @sizeOf(i32);
@@ -18,7 +17,6 @@ const VALUE_LEN_HOLDER = @sizeOf(i32);
 
 pub const RECORD_HEADER_SIZE = CRC + TIMESTAMP + KEY_LEN_HOLDER + VALUE_LEN_HOLDER;
 
-// Configurable limits for on-disk log
 pub const OnDiskLogConfig = struct {
     log_file_max_size_bytes: u64 = 1024 * 1024 * 1024, // 1 GB
     key_max_size_bytes: u64 = 1024, // 1 KB
@@ -32,8 +30,15 @@ pub const Record = struct {
     value: []const u8,
 };
 
-// OnDiskLog - Stateless namespace for log file operations
 pub const OnDiskLog = struct {
+    pub fn create(file_path: []const u8) !std.fs.File {
+        return try std.fs.createFileAbsolute(file_path, .{ .truncate = true, .read = true });
+    }
+
+    pub fn open(file_path: []const u8) !std.fs.File {
+        return try std.fs.openFileAbsolute(file_path, .{ .mode = .read_write });
+    }
+
     pub fn serializedSize(config: OnDiskLogConfig, record: Record) usize {
         var size: usize = 0;
         size += RECORD_HEADER_SIZE;
@@ -292,4 +297,83 @@ test "OnDiskLog.deserialize with CRC mismatch" {
     const err = OnDiskLog.deserialize(config, reader, allocator);
 
     try std.testing.expectError(error.CRCMismatch, err);
+}
+
+test "OnDiskLog.create creates new log file" {
+    const test_dir = "test_ondisklog_create";
+    std.fs.cwd().makeDir(test_dir) catch |err| {
+        if (err != error.PathAlreadyExists) return err;
+    };
+    defer std.fs.cwd().deleteTree(test_dir) catch {};
+
+    const abs_path = try std.fs.cwd().realpathAlloc(std.testing.allocator, test_dir);
+    defer std.testing.allocator.free(abs_path);
+
+    const file_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/test.log", .{abs_path});
+    defer std.testing.allocator.free(file_path);
+
+    // Create file
+    const file = try OnDiskLog.create(file_path);
+    defer file.close();
+
+    // Verify file exists and is empty
+    const stat = try file.stat();
+    try std.testing.expectEqual(@as(u64, 0), stat.size);
+
+    // Verify we can write to it
+    try file.writeAll("test");
+    const stat2 = try file.stat();
+    try std.testing.expectEqual(@as(u64, 4), stat2.size);
+}
+
+test "OnDiskLog.open opens existing log file" {
+    const test_dir = "test_ondisklog_open";
+    std.fs.cwd().makeDir(test_dir) catch |err| {
+        if (err != error.PathAlreadyExists) return err;
+    };
+    defer std.fs.cwd().deleteTree(test_dir) catch {};
+
+    const abs_path = try std.fs.cwd().realpathAlloc(std.testing.allocator, test_dir);
+    defer std.testing.allocator.free(abs_path);
+
+    const file_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/test.log", .{abs_path});
+    defer std.testing.allocator.free(file_path);
+
+    // Create file and write some data
+    {
+        const file = try OnDiskLog.create(file_path);
+        defer file.close();
+        try file.writeAll("existing data");
+    }
+
+    // Open existing file
+    const file = try OnDiskLog.open(file_path);
+    defer file.close();
+
+    // Verify file contains existing data
+    const stat = try file.stat();
+    try std.testing.expectEqual(@as(u64, 13), stat.size);
+
+    // Verify we can read from it
+    var buf: [13]u8 = undefined;
+    try file.seekTo(0);
+    _ = try file.readAll(&buf);
+    try std.testing.expectEqualStrings("existing data", &buf);
+}
+
+test "OnDiskLog.open returns error for non-existent file" {
+    const test_dir = "test_ondisklog_open_error";
+    std.fs.cwd().makeDir(test_dir) catch |err| {
+        if (err != error.PathAlreadyExists) return err;
+    };
+    defer std.fs.cwd().deleteTree(test_dir) catch {};
+
+    const abs_path = try std.fs.cwd().realpathAlloc(std.testing.allocator, test_dir);
+    defer std.testing.allocator.free(abs_path);
+
+    const file_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/nonexistent.log", .{abs_path});
+    defer std.testing.allocator.free(file_path);
+
+    // Try to open non-existent file
+    try std.testing.expectError(error.FileNotFound, OnDiskLog.open(file_path));
 }
