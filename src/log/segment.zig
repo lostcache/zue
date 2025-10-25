@@ -44,6 +44,8 @@ pub const SegmentConfig = struct {
 };
 
 pub const Segment = struct {
+    gpa_alloc: std.mem.Allocator,
+
     config: SegmentConfig,
     base_offset: u64,
     next_relative_offset: u32,
@@ -101,6 +103,7 @@ pub const Segment = struct {
         }
 
         return Segment{
+            .gpa_alloc = gpa_alloc,
             .config = config,
             .base_offset = base_offset,
             .next_relative_offset = 0,
@@ -149,12 +152,12 @@ pub const Segment = struct {
         const index_stat = try index_file.stat();
         const index_file_size = index_stat.size;
 
-        const next_relative_offset: u32 = @intCast(LogIndex.OnDiskIndex.getEntryCount(index_file_size));
-
-        // Calculate bytes written since last index
+        // Calculate next_relative_offset and bytes_since_last_index
+        var next_relative_offset: u32 = 0;
         var bytes_since_last_index: u64 = 0;
+
         if (index_file_size > 0) {
-            // Read the last index entry to get the position where last index was created
+            // Read the last index entry
             const entry_count = LogIndex.OnDiskIndex.getEntryCount(index_file_size);
             const last_index_pos = (entry_count - 1) * LogIndex.INDEX_SIZE_BYTES;
 
@@ -162,14 +165,50 @@ pub const Segment = struct {
             var buf: [LogIndex.INDEX_SIZE_BYTES]u8 = undefined;
             _ = try index_file.readAll(&buf);
 
+            const last_indexed_relative_offset = std.mem.readInt(u32, buf[0..4], .little);
             const last_indexed_pos = std.mem.readInt(u32, buf[4..8], .little);
+
+            // Count records from the last indexed position to EOF
+            var arena = std.heap.ArenaAllocator.init(gpa_alloc);
+            defer arena.deinit();
+            const temp_alloc = arena.allocator();
+
+            try log_file.seekTo(last_indexed_pos);
+            var record_count: u32 = 0;
+            while (true) {
+                const current_pos = try log_file.getPos();
+                if (current_pos >= log_file_size) break;
+
+                const rec = OnDiskLog.OnDiskLog.deserialize(config.log_config, log_file, temp_alloc) catch break;
+                _ = rec;
+                record_count += 1;
+            }
+
+            next_relative_offset = last_indexed_relative_offset + record_count;
             bytes_since_last_index = log_file_size - last_indexed_pos;
         } else {
-            // No index entries yet, all bytes are since "last index"
+            // No index entries - count all records from beginning
+            var arena = std.heap.ArenaAllocator.init(gpa_alloc);
+            defer arena.deinit();
+            const temp_alloc = arena.allocator();
+
+            try log_file.seekTo(0);
+            var record_count: u32 = 0;
+            while (true) {
+                const current_pos = try log_file.getPos();
+                if (current_pos >= log_file_size) break;
+
+                const rec = OnDiskLog.OnDiskLog.deserialize(config.log_config, log_file, temp_alloc) catch break;
+                _ = rec;
+                record_count += 1;
+            }
+
+            next_relative_offset = record_count;
             bytes_since_last_index = log_file_size;
         }
 
         return Segment{
+            .gpa_alloc = gpa_alloc,
             .config = config,
             .base_offset = base_offset,
             .next_relative_offset = next_relative_offset,
@@ -186,15 +225,17 @@ pub const Segment = struct {
     pub fn close(self: *Segment) void {
         self.log_file.close();
         self.index_file.close();
+        self.gpa_alloc.free(self.log_file_name);
+        self.gpa_alloc.free(self.index_file_name);
     }
 
-    pub fn delete(self: *Segment, gpa_alloc: std.mem.Allocator) !void {
+    pub fn delete(self: *Segment) !void {
         self.log_file.close();
         self.index_file.close();
         try std.fs.deleteFileAbsolute(self.log_file_name);
         try std.fs.deleteFileAbsolute(self.index_file_name);
-        gpa_alloc.free(self.log_file_name);
-        gpa_alloc.free(self.index_file_name);
+        self.gpa_alloc.free(self.log_file_name);
+        self.gpa_alloc.free(self.index_file_name);
     }
 
     pub fn append(self: *Segment, record: OnDiskLog.Record) !void {
@@ -236,6 +277,11 @@ pub const Segment = struct {
         }
         const relative_offset: u32 = @intCast(offset - self.base_offset);
 
+        // Check if offset is beyond what we've written
+        if (relative_offset >= self.next_relative_offset) {
+            return error.OffsetOutOfBounds;
+        }
+
         const index_entry = try LogIndex.OnDiskIndex.lookup(
             self.config.index_config,
             self.index_file,
@@ -243,7 +289,19 @@ pub const Segment = struct {
             relative_offset,
         );
 
+        // Seek to the indexed position
         try self.log_file.seekTo(index_entry.pos);
+
+        // Scan forward from the indexed position to find the exact record
+        var current_relative_offset = index_entry.relative_offset;
+        while (current_relative_offset < relative_offset) : (current_relative_offset += 1) {
+            // Skip this record by deserializing and immediately freeing
+            const skip_record = try OnDiskLog.OnDiskLog.deserialize(self.config.log_config, self.log_file, allocator);
+            allocator.free(skip_record.value);
+            if (skip_record.key) |k| allocator.free(k);
+        }
+
+        // Now read the target record
         return try OnDiskLog.OnDiskLog.deserialize(self.config.log_config, self.log_file, allocator);
     }
 
@@ -303,7 +361,7 @@ test "Segment: create new segment" {
     const config = SegmentConfig.default();
 
     var segment = try Segment.create(config, abs_path, test_offset, std.testing.allocator);
-    defer segment.delete(std.testing.allocator) catch {};
+    defer segment.delete() catch {};
 
     // Verify initial state
     try std.testing.expectEqual(test_offset, segment.base_offset);
@@ -330,15 +388,11 @@ test "Segment: open existing segment" {
 
     // Create segment first
     var segment1 = try Segment.create(config, abs_path, test_offset, std.testing.allocator);
-    const log_name = segment1.log_file_name;
-    const index_name = segment1.index_file_name;
-    defer std.testing.allocator.free(log_name);
-    defer std.testing.allocator.free(index_name);
     segment1.close();
 
     // Open existing segment
     var segment2 = try Segment.open(config, abs_path, test_offset, std.testing.allocator);
-    defer segment2.delete(std.testing.allocator) catch {};
+    defer segment2.delete() catch {};
 
     try std.testing.expectEqual(test_offset, segment2.base_offset);
 }
@@ -361,7 +415,7 @@ test "Segment: append single record" {
     };
 
     var segment = try Segment.create(config, abs_path, test_offset, std.testing.allocator);
-    defer segment.delete(std.testing.allocator) catch {};
+    defer segment.delete() catch {};
 
     const record = OnDiskLog.Record{ .key = "test-key", .value = "test-value" };
     try segment.append(record);
@@ -390,7 +444,7 @@ test "Segment: append and read multiple records" {
     };
 
     var segment = try Segment.create(config, abs_path, test_offset, std.testing.allocator);
-    defer segment.delete(std.testing.allocator) catch {};
+    defer segment.delete() catch {};
 
     // Append multiple records
     const record1 = OnDiskLog.Record{ .key = "key1", .value = "value1" };
@@ -433,22 +487,19 @@ test "Segment: persistence across close/open" {
     // Create, write, and close
     {
         var segment = try Segment.create(config, abs_path, test_offset, std.testing.allocator);
-        defer std.testing.allocator.free(segment.log_file_name);
-        defer std.testing.allocator.free(segment.index_file_name);
+        defer segment.close();
 
         const record = OnDiskLog.Record{ .key = "persist", .value = "test-data" };
         try segment.append(record);
 
         saved_log_size = segment.log_file_size;
         saved_index_size = segment.index_file_size;
-
-        segment.close();
     }
 
     // Reopen and verify
     {
         var segment = try Segment.open(config, abs_path, test_offset, std.testing.allocator);
-        defer segment.delete(std.testing.allocator) catch {};
+        defer segment.delete() catch {};
 
         try std.testing.expectEqual(saved_log_size, segment.log_file_size);
         try std.testing.expectEqual(saved_index_size, segment.index_file_size);
@@ -488,7 +539,7 @@ test "Segment: log file full error" {
     };
 
     var segment = try Segment.create(config, abs_path, test_offset, std.testing.allocator);
-    defer segment.delete(std.testing.allocator) catch {};
+    defer segment.delete() catch {};
 
     // First append should succeed
     const record1 = OnDiskLog.Record{ .key = "k1", .value = "v1" };
@@ -526,7 +577,7 @@ test "Segment: index file full error" {
     };
 
     var segment = try Segment.create(config, abs_path, test_offset, std.testing.allocator);
-    defer segment.delete(std.testing.allocator) catch {};
+    defer segment.delete() catch {};
 
     // First append creates index at offset 0
     const record1 = OnDiskLog.Record{ .key = "k1", .value = "v1" };
@@ -566,7 +617,7 @@ test "Segment: isFull returns correct status" {
     };
 
     var segment = try Segment.create(config, abs_path, test_offset, std.testing.allocator);
-    defer segment.delete(std.testing.allocator) catch {};
+    defer segment.delete() catch {};
 
     // Initially not full
     try std.testing.expect(!segment.isFull());
@@ -600,7 +651,7 @@ test "Segment: read with invalid offset returns error" {
     };
 
     var segment = try Segment.create(config, abs_path, test_offset, std.testing.allocator);
-    defer segment.delete(std.testing.allocator) catch {};
+    defer segment.delete() catch {};
 
     const record = OnDiskLog.Record{ .key = "key", .value = "value" };
     try segment.append(record);
@@ -627,7 +678,7 @@ test "Segment: getSize returns correct log file size" {
     };
 
     var segment = try Segment.create(config, abs_path, test_offset, std.testing.allocator);
-    defer segment.delete(std.testing.allocator) catch {};
+    defer segment.delete() catch {};
 
     try std.testing.expectEqual(@as(u64, 0), segment.getSize());
 
@@ -662,7 +713,7 @@ test "Segment: delete removes both files" {
     const index_path = try std.testing.allocator.dupe(u8, segment.index_file_name);
     defer std.testing.allocator.free(index_path);
 
-    try segment.delete(std.testing.allocator);
+    try segment.delete();
 
     // Verify files are deleted
     const log_err = std.fs.openFileAbsolute(log_path, .{});
@@ -776,7 +827,7 @@ test "Segment: sparse index creation based on bytes_per_index" {
     };
 
     var segment = try Segment.create(config, abs_path, test_offset, std.testing.allocator);
-    defer segment.delete(std.testing.allocator) catch {};
+    defer segment.delete() catch {};
 
     // We'll append exactly 9 records and expect exactly 3 indices at offsets 0, 4, and 8
     const num_records = 9;
