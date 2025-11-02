@@ -142,6 +142,23 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
 
+    // Integration tests - spawn server subprocess and test over real TCP
+    const integration_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/integration_test.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+
+    const run_integration_tests = b.addRunArtifact(integration_tests);
+
+    // Integration tests depend on server being built first
+    run_integration_tests.step.dependOn(b.getInstallStep());
+
+    const integration_test_step = b.step("test-integration", "Run integration tests (spawns server subprocess)");
+    integration_test_step.dependOn(&run_integration_tests.step);
+
     // Benchmark executable
     const bench_exe = b.addExecutable(.{
         .name = "bench",
@@ -160,6 +177,26 @@ pub fn build(b: *std.Build) void {
 
     const bench_step = b.step("bench", "Run performance benchmarks");
     bench_step.dependOn(&run_bench.step);
+
+    // Server executable
+    const server_exe = b.addExecutable(.{
+        .name = "zue-server",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/server.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    b.installArtifact(server_exe);
+
+    const run_server = b.addRunArtifact(server_exe);
+    const server_step = b.step("server", "Run the Zue server");
+    server_step.dependOn(&run_server.step);
+    run_server.step.dependOn(b.getInstallStep());
+
+    if (b.args) |args| {
+        run_server.addArgs(args);
+    }
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
