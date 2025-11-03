@@ -138,6 +138,59 @@ pub const Log = struct {
         return try seg.read(offset, allocator);
     }
 
+    /// Read a range of records starting from start_offset
+    /// Returns a slice of records allocated in the provided allocator
+    /// Caller must free each record's key/value AND the returned slice
+    /// max_count limits the number of records returned
+    pub fn readRange(
+        self: *Log,
+        start_offset: u64,
+        max_count: u32,
+        allocator: std.mem.Allocator,
+    ) ![]Record {
+        if (max_count == 0) {
+            return try allocator.alloc(Record, 0);
+        }
+
+        // Validate start_offset is within bounds
+        if (start_offset < self.getOldestOffset() or start_offset >= self.next_offset) {
+            return error.OffsetOutOfBounds;
+        }
+
+        // Calculate how many records we can actually read
+        const available_records = self.next_offset - start_offset;
+        const records_to_read = @min(max_count, available_records);
+
+        var records = try std.ArrayList(Record).initCapacity(allocator, records_to_read);
+        errdefer {
+            for (records.items) |rec| {
+                if (rec.key) |k| allocator.free(k);
+                allocator.free(rec.value);
+            }
+            records.deinit(allocator);
+        }
+
+        var current_offset = start_offset;
+        var count: u32 = 0;
+
+        while (count < records_to_read) : (count += 1) {
+            const rec = self.read(current_offset, allocator) catch |err| {
+                // Clean up already read records
+                for (records.items) |r| {
+                    if (r.key) |k| allocator.free(k);
+                    allocator.free(r.value);
+                }
+                records.deinit(allocator);
+                return err;
+            };
+
+            try records.append(allocator, rec);
+            current_offset += 1;
+        }
+
+        return records.toOwnedSlice(allocator);
+    }
+
     pub fn getNextOffset(self: *Log) u64 {
         return self.next_offset;
     }
@@ -565,6 +618,176 @@ test "Log: open with empty directory returns error" {
 
     const config = LogConfig.default();
     try std.testing.expectError(error.NoSegmentsFound, Log.open(config, abs_path, std.testing.allocator));
+}
+
+test "Log.readRange: read multiple records" {
+    const test_dir = "test_log_read_range";
+    defer std.fs.cwd().deleteTree(test_dir) catch {};
+
+    const abs_path = try std.fs.cwd().realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(abs_path);
+
+    const log_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/{s}", .{ abs_path, test_dir });
+    defer std.testing.allocator.free(log_path);
+
+    const config = LogConfig.default();
+    var log = try Log.create(config, log_path, std.testing.allocator);
+    defer log.delete() catch {};
+
+    // Append 10 records
+    var i: u64 = 0;
+    while (i < 10) : (i += 1) {
+        const key = try std.fmt.allocPrint(std.testing.allocator, "key-{d}", .{i});
+        defer std.testing.allocator.free(key);
+        const value = try std.fmt.allocPrint(std.testing.allocator, "value-{d}", .{i});
+        defer std.testing.allocator.free(value);
+        _ = try log.append(Record{ .key = key, .value = value });
+    }
+
+    // Read range [2, 6) - should get 5 records
+    const records = try log.readRange(2, 5, std.testing.allocator);
+    defer {
+        for (records) |rec| {
+            if (rec.key) |k| std.testing.allocator.free(k);
+            std.testing.allocator.free(rec.value);
+        }
+        std.testing.allocator.free(records);
+    }
+
+    try std.testing.expectEqual(@as(usize, 5), records.len);
+    try std.testing.expectEqualStrings("key-2", records[0].key.?);
+    try std.testing.expectEqualStrings("value-2", records[0].value);
+    try std.testing.expectEqualStrings("key-6", records[4].key.?);
+    try std.testing.expectEqualStrings("value-6", records[4].value);
+}
+
+test "Log.readRange: read all available records when max_count exceeds available" {
+    const test_dir = "test_log_read_range_exceed";
+    defer std.fs.cwd().deleteTree(test_dir) catch {};
+
+    const abs_path = try std.fs.cwd().realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(abs_path);
+
+    const log_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/{s}", .{ abs_path, test_dir });
+    defer std.testing.allocator.free(log_path);
+
+    const config = LogConfig.default();
+    var log = try Log.create(config, log_path, std.testing.allocator);
+    defer log.delete() catch {};
+
+    // Append 3 records
+    _ = try log.append(Record{ .key = "k1", .value = "v1" });
+    _ = try log.append(Record{ .key = "k2", .value = "v2" });
+    _ = try log.append(Record{ .key = "k3", .value = "v3" });
+
+    // Request 100 records starting from offset 1, should only get 2
+    const records = try log.readRange(1, 100, std.testing.allocator);
+    defer {
+        for (records) |rec| {
+            if (rec.key) |k| std.testing.allocator.free(k);
+            std.testing.allocator.free(rec.value);
+        }
+        std.testing.allocator.free(records);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), records.len);
+    try std.testing.expectEqualStrings("k2", records[0].key.?);
+    try std.testing.expectEqualStrings("k3", records[1].key.?);
+}
+
+test "Log.readRange: read zero records" {
+    const test_dir = "test_log_read_range_zero";
+    defer std.fs.cwd().deleteTree(test_dir) catch {};
+
+    const abs_path = try std.fs.cwd().realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(abs_path);
+
+    const log_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/{s}", .{ abs_path, test_dir });
+    defer std.testing.allocator.free(log_path);
+
+    const config = LogConfig.default();
+    var log = try Log.create(config, log_path, std.testing.allocator);
+    defer log.delete() catch {};
+
+    _ = try log.append(Record{ .key = "k1", .value = "v1" });
+
+    const records = try log.readRange(0, 0, std.testing.allocator);
+    defer std.testing.allocator.free(records);
+
+    try std.testing.expectEqual(@as(usize, 0), records.len);
+}
+
+test "Log.readRange: offset out of bounds returns error" {
+    const test_dir = "test_log_read_range_oob";
+    defer std.fs.cwd().deleteTree(test_dir) catch {};
+
+    const abs_path = try std.fs.cwd().realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(abs_path);
+
+    const log_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/{s}", .{ abs_path, test_dir });
+    defer std.testing.allocator.free(log_path);
+
+    const config = LogConfig.default();
+    var log = try Log.create(config, log_path, std.testing.allocator);
+    defer log.delete() catch {};
+
+    _ = try log.append(Record{ .key = "k1", .value = "v1" });
+
+    // Try to read from offset 10 (out of bounds)
+    try std.testing.expectError(error.OffsetOutOfBounds, log.readRange(10, 5, std.testing.allocator));
+}
+
+test "Log.readRange: read across multiple segments" {
+    const test_dir = "test_log_read_range_multi_segment";
+    defer std.fs.cwd().deleteTree(test_dir) catch {};
+
+    const abs_path = try std.fs.cwd().realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(abs_path);
+
+    const log_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/{s}", .{ abs_path, test_dir });
+    defer std.testing.allocator.free(log_path);
+
+    const test_rec = Record{ .key = "k", .value = "v" };
+    const rec_size = record.OnDiskLog.serializedSize(record.OnDiskLogConfig{}, test_rec);
+
+    // Configure log to hold only 2 records per segment
+    const config = LogConfig{
+        .segment_config = SegmentConfig{
+            .log_config = record.OnDiskLogConfig{
+                .log_file_max_size_bytes = rec_size * 2,
+            },
+            .index_config = log_index.OnDiskIndexConfig{},
+        },
+        .initial_offset = 0,
+    };
+
+    var log = try Log.create(config, log_path, std.testing.allocator);
+    defer log.delete() catch {};
+
+    // Append 5 records (will span 3 segments: 2, 2, 1)
+    var i: u64 = 0;
+    while (i < 5) : (i += 1) {
+        const key = try std.fmt.allocPrint(std.testing.allocator, "k{d}", .{i});
+        defer std.testing.allocator.free(key);
+        const value = try std.fmt.allocPrint(std.testing.allocator, "v{d}", .{i});
+        defer std.testing.allocator.free(value);
+        _ = try log.append(Record{ .key = key, .value = value });
+    }
+
+    // Read range that spans segments [1, 4) - should cross 2 segments
+    const records = try log.readRange(1, 3, std.testing.allocator);
+    defer {
+        for (records) |rec| {
+            if (rec.key) |k| std.testing.allocator.free(k);
+            std.testing.allocator.free(rec.value);
+        }
+        std.testing.allocator.free(records);
+    }
+
+    try std.testing.expectEqual(@as(usize, 3), records.len);
+    try std.testing.expectEqualStrings("k1", records[0].key.?);
+    try std.testing.expectEqualStrings("k2", records[1].key.?);
+    try std.testing.expectEqualStrings("k3", records[2].key.?);
 }
 
 test {

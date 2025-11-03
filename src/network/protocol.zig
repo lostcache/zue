@@ -16,11 +16,20 @@ const std = @import("std");
 pub const Record = @import("../log/record.zig").Record;
 
 pub const MessageType = enum(u8) {
+    // Client-Server messages
     append_request = 0x01,
     append_response = 0x02,
     read_request = 0x03,
     read_response = 0x04,
     error_response = 0xFF,
+
+    // Replication messages (Leader <-> Follower)
+    replicate_request = 0x10,
+    replicate_response = 0x11,
+    heartbeat_request = 0x20,
+    heartbeat_response = 0x21,
+    catch_up_request = 0x30,
+    catch_up_response = 0x31,
 };
 
 pub const ErrorCode = enum(u8) {
@@ -31,6 +40,12 @@ pub const ErrorCode = enum(u8) {
     serialization_error = 0x04,
     invalid_message = 0x05,
     log_full = 0x06,
+    // Replication-specific errors
+    not_leader = 0x10,
+    quorum_failed = 0x11,
+    replication_timeout = 0x12,
+    offset_mismatch = 0x13,
+    insufficient_isr = 0x14,
 };
 
 pub const AppendRequest = struct {
@@ -54,12 +69,59 @@ pub const ErrorResponse = struct {
     message: []const u8,
 };
 
+// ============================================================================
+// Replication Protocol Messages
+// ============================================================================
+
+pub const ReplicateRequest = struct {
+    offset: u64,           // Expected offset on follower (for gap detection)
+    record: Record,        // The record to replicate
+    leader_commit: u64,    // Leader's commit index (for follower to advance)
+};
+
+pub const ReplicateResponse = struct {
+    success: bool,
+    follower_offset: u64,   // Follower's current last offset
+    error_code: ErrorCode,  // Error code on failure
+};
+
+pub const HeartbeatRequest = struct {
+    leader_commit: u64,    // For follower to advance commit index
+    leader_offset: u64,    // Leader's last offset
+};
+
+pub const HeartbeatResponse = struct {
+    follower_offset: u64,  // Follower's last offset
+};
+
+pub const CatchUpRequest = struct {
+    start_offset: u64,     // Follower's current offset + 1
+    max_entries: u32,      // Max entries to send in one response
+};
+
+pub const ReplicatedEntry = struct {
+    offset: u64,
+    record: Record,
+};
+
+pub const CatchUpResponse = struct {
+    entries: []ReplicatedEntry,  // Batch of entries
+    more: bool,                  // Are there more entries after this batch?
+};
+
 pub const Message = union(MessageType) {
     append_request: AppendRequest,
     append_response: AppendResponse,
     read_request: ReadRequest,
     read_response: ReadResponse,
     error_response: ErrorResponse,
+    // Replication messages
+    replicate_request: ReplicateRequest,
+    replicate_response: ReplicateResponse,
+    heartbeat_request: HeartbeatRequest,
+    heartbeat_response: HeartbeatResponse,
+    catch_up_request: CatchUpRequest,
+    catch_up_response: CatchUpResponse,
 };
 
 pub const ProtocolError = error{
@@ -111,6 +173,12 @@ pub fn serializeMessage(writer: anytype, message: Message, allocator: std.mem.Al
         .read_request => |req| try serializeReadRequest(payload_writer, req),
         .read_response => |res| try serializeReadResponse(payload_writer, res),
         .error_response => |err| try serializeErrorResponse(payload_writer, err),
+        .replicate_request => |req| try serializeReplicateRequest(payload_writer, req),
+        .replicate_response => |res| try serializeReplicateResponse(payload_writer, res),
+        .heartbeat_request => |req| try serializeHeartbeatRequest(payload_writer, req),
+        .heartbeat_response => |res| try serializeHeartbeatResponse(payload_writer, res),
+        .catch_up_request => |req| try serializeCatchUpRequest(payload_writer, req),
+        .catch_up_response => |res| try serializeCatchUpResponse(payload_writer, res, allocator),
     }
 
     const payload = payload_buffer.items;
@@ -172,6 +240,12 @@ pub fn deserializeMessageBody(reader: anytype, allocator: std.mem.Allocator) !Me
         .read_request => Message{ .read_request = try deserializeReadRequest(reader) },
         .read_response => Message{ .read_response = try deserializeReadResponse(reader, allocator) },
         .error_response => Message{ .error_response = try deserializeErrorResponse(reader, allocator) },
+        .replicate_request => Message{ .replicate_request = try deserializeReplicateRequest(reader, allocator) },
+        .replicate_response => Message{ .replicate_response = try deserializeReplicateResponse(reader) },
+        .heartbeat_request => Message{ .heartbeat_request = try deserializeHeartbeatRequest(reader) },
+        .heartbeat_response => Message{ .heartbeat_response = try deserializeHeartbeatResponse(reader) },
+        .catch_up_request => Message{ .catch_up_request = try deserializeCatchUpRequest(reader) },
+        .catch_up_response => Message{ .catch_up_response = try deserializeCatchUpResponse(reader, allocator) },
     };
 }
 
@@ -664,6 +738,342 @@ test "serializeErrorResponse and deserializeErrorResponse" {
 
     try std.testing.expectEqual(ErrorCode.io_error, deserialized.error_response.code);
     try std.testing.expectEqualStrings("Test error message", deserialized.error_response.message);
+}
+
+// ============================================================================
+// Replication message serialization/deserialization
+// ============================================================================
+
+fn serializeReplicateRequest(writer: anytype, req: ReplicateRequest) !void {
+    try writeIntBinary(writer, u64, req.offset, .little);
+    try writeIntBinary(writer, u64, req.leader_commit, .little);
+    // Serialize record (same as AppendRequest)
+    if (req.record.key) |key| {
+        const key_len: i32 = @intCast(key.len);
+        try writeIntBinary(writer, i32, key_len, .little);
+        try writer.writeAll(key);
+    } else {
+        try writeIntBinary(writer, i32, -1, .little);
+    }
+    const value_len: i32 = @intCast(req.record.value.len);
+    try writeIntBinary(writer, i32, value_len, .little);
+    try writer.writeAll(req.record.value);
+}
+
+fn deserializeReplicateRequest(reader: anytype, allocator: std.mem.Allocator) !ReplicateRequest {
+    const offset = try readIntFromBinary(reader, u64, .little);
+    const leader_commit = try readIntFromBinary(reader, u64, .little);
+
+    // Deserialize record
+    const key_len = try readIntFromBinary(reader, i32, .little);
+    const key: ?[]const u8 = if (key_len >= 0) blk: {
+        const k = try allocator.alloc(u8, @intCast(key_len));
+        try readFull(reader, k);
+        break :blk k;
+    } else null;
+
+    const value_len = try readIntFromBinary(reader, i32, .little);
+    if (value_len < 0) {
+        if (key) |k| allocator.free(k);
+        return ProtocolError.DeserializationError;
+    }
+
+    const value = try allocator.alloc(u8, @intCast(value_len));
+    try readFull(reader, value);
+
+    return ReplicateRequest{
+        .offset = offset,
+        .leader_commit = leader_commit,
+        .record = Record{ .key = key, .value = value },
+    };
+}
+
+fn serializeReplicateResponse(writer: anytype, res: ReplicateResponse) !void {
+    const success_byte: u8 = if (res.success) 1 else 0;
+    try writer.writeAll(&[_]u8{success_byte});
+    try writeIntBinary(writer, u64, res.follower_offset, .little);
+    const error_code_byte = @intFromEnum(res.error_code);
+    try writer.writeAll(&[_]u8{error_code_byte});
+}
+
+fn deserializeReplicateResponse(reader: anytype) !ReplicateResponse {
+    var success_bytes: [1]u8 = undefined;
+    try readFull(reader, &success_bytes);
+    const success = success_bytes[0] != 0;
+
+    const follower_offset = try readIntFromBinary(reader, u64, .little);
+
+    var error_code_bytes: [1]u8 = undefined;
+    try readFull(reader, &error_code_bytes);
+    const error_code = std.meta.intToEnum(ErrorCode, error_code_bytes[0]) catch ErrorCode.unknown;
+
+    return ReplicateResponse{
+        .success = success,
+        .follower_offset = follower_offset,
+        .error_code = error_code,
+    };
+}
+
+fn serializeHeartbeatRequest(writer: anytype, req: HeartbeatRequest) !void {
+    try writeIntBinary(writer, u64, req.leader_commit, .little);
+    try writeIntBinary(writer, u64, req.leader_offset, .little);
+}
+
+fn deserializeHeartbeatRequest(reader: anytype) !HeartbeatRequest {
+    return HeartbeatRequest{
+        .leader_commit = try readIntFromBinary(reader, u64, .little),
+        .leader_offset = try readIntFromBinary(reader, u64, .little),
+    };
+}
+
+fn serializeHeartbeatResponse(writer: anytype, res: HeartbeatResponse) !void {
+    try writeIntBinary(writer, u64, res.follower_offset, .little);
+}
+
+fn deserializeHeartbeatResponse(reader: anytype) !HeartbeatResponse {
+    return HeartbeatResponse{
+        .follower_offset = try readIntFromBinary(reader, u64, .little),
+    };
+}
+
+fn serializeCatchUpRequest(writer: anytype, req: CatchUpRequest) !void {
+    try writeIntBinary(writer, u64, req.start_offset, .little);
+    try writeIntBinary(writer, u32, req.max_entries, .little);
+}
+
+fn deserializeCatchUpRequest(reader: anytype) !CatchUpRequest {
+    return CatchUpRequest{
+        .start_offset = try readIntFromBinary(reader, u64, .little),
+        .max_entries = try readIntFromBinary(reader, u32, .little),
+    };
+}
+
+fn serializeCatchUpResponse(writer: anytype, res: CatchUpResponse, allocator: std.mem.Allocator) !void {
+    _ = allocator;
+    const entry_count: u32 = @intCast(res.entries.len);
+    try writeIntBinary(writer, u32, entry_count, .little);
+
+    // Serialize each entry
+    for (res.entries) |entry| {
+        try writeIntBinary(writer, u64, entry.offset, .little);
+        // Serialize record
+        if (entry.record.key) |key| {
+            const key_len: i32 = @intCast(key.len);
+            try writeIntBinary(writer, i32, key_len, .little);
+            try writer.writeAll(key);
+        } else {
+            try writeIntBinary(writer, i32, -1, .little);
+        }
+        const value_len: i32 = @intCast(entry.record.value.len);
+        try writeIntBinary(writer, i32, value_len, .little);
+        try writer.writeAll(entry.record.value);
+    }
+
+    const more_byte: u8 = if (res.more) 1 else 0;
+    try writer.writeAll(&[_]u8{more_byte});
+}
+
+fn deserializeCatchUpResponse(reader: anytype, allocator: std.mem.Allocator) !CatchUpResponse {
+    const entry_count = try readIntFromBinary(reader, u32, .little);
+
+    var entries = try std.ArrayList(ReplicatedEntry).initCapacity(allocator, entry_count);
+    errdefer {
+        for (entries.items) |entry| {
+            if (entry.record.key) |k| allocator.free(k);
+            allocator.free(entry.record.value);
+        }
+        entries.deinit(allocator);
+    }
+
+    var i: u32 = 0;
+    while (i < entry_count) : (i += 1) {
+        const offset = try readIntFromBinary(reader, u64, .little);
+
+        // Deserialize record
+        const key_len = try readIntFromBinary(reader, i32, .little);
+        const key: ?[]const u8 = if (key_len >= 0) blk: {
+            const k = try allocator.alloc(u8, @intCast(key_len));
+            try readFull(reader, k);
+            break :blk k;
+        } else null;
+
+        const value_len = try readIntFromBinary(reader, i32, .little);
+        if (value_len < 0) {
+            if (key) |k| allocator.free(k);
+            return ProtocolError.DeserializationError;
+        }
+
+        const value = try allocator.alloc(u8, @intCast(value_len));
+        try readFull(reader, value);
+
+        try entries.append(allocator, ReplicatedEntry{
+            .offset = offset,
+            .record = Record{ .key = key, .value = value },
+        });
+    }
+
+    var more_bytes: [1]u8 = undefined;
+    try readFull(reader, &more_bytes);
+    const more = more_bytes[0] != 0;
+
+    return CatchUpResponse{
+        .entries = try entries.toOwnedSlice(allocator),
+        .more = more,
+    };
+}
+
+// ============================================================================
+// Replication message tests
+// ============================================================================
+
+test "ReplicateRequest: serialize and deserialize" {
+    const allocator = std.testing.allocator;
+
+    const original = Message{
+        .replicate_request = .{
+            .offset = 42,
+            .leader_commit = 41,
+            .record = Record{ .key = "test-key", .value = "test-value" },
+        },
+    };
+
+    var buffer: [4096]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buffer);
+    try serializeMessage(stream.writer(), original, allocator);
+
+    var read_stream = std.io.fixedBufferStream(stream.getWritten());
+    const deserialized = try deserializeMessage(read_stream.reader(), allocator);
+    defer {
+        if (deserialized.replicate_request.record.key) |k| allocator.free(k);
+        allocator.free(deserialized.replicate_request.record.value);
+    }
+
+    try std.testing.expectEqual(@as(u64, 42), deserialized.replicate_request.offset);
+    try std.testing.expectEqual(@as(u64, 41), deserialized.replicate_request.leader_commit);
+    try std.testing.expectEqualStrings("test-key", deserialized.replicate_request.record.key.?);
+    try std.testing.expectEqualStrings("test-value", deserialized.replicate_request.record.value);
+}
+
+test "ReplicateResponse: serialize and deserialize" {
+    const allocator = std.testing.allocator;
+
+    const original = Message{
+        .replicate_response = .{
+            .success = true,
+            .follower_offset = 42,
+            .error_code = .unknown,
+        },
+    };
+
+    var buffer: [4096]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buffer);
+    try serializeMessage(stream.writer(), original, allocator);
+
+    var read_stream = std.io.fixedBufferStream(stream.getWritten());
+    const deserialized = try deserializeMessage(read_stream.reader(), allocator);
+
+    try std.testing.expectEqual(true, deserialized.replicate_response.success);
+    try std.testing.expectEqual(@as(u64, 42), deserialized.replicate_response.follower_offset);
+}
+
+test "HeartbeatRequest: serialize and deserialize" {
+    const allocator = std.testing.allocator;
+
+    const original = Message{
+        .heartbeat_request = .{
+            .leader_commit = 100,
+            .leader_offset = 101,
+        },
+    };
+
+    var buffer: [4096]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buffer);
+    try serializeMessage(stream.writer(), original, allocator);
+
+    var read_stream = std.io.fixedBufferStream(stream.getWritten());
+    const deserialized = try deserializeMessage(read_stream.reader(), allocator);
+
+    try std.testing.expectEqual(@as(u64, 100), deserialized.heartbeat_request.leader_commit);
+    try std.testing.expectEqual(@as(u64, 101), deserialized.heartbeat_request.leader_offset);
+}
+
+test "HeartbeatResponse: serialize and deserialize" {
+    const allocator = std.testing.allocator;
+
+    const original = Message{
+        .heartbeat_response = .{
+            .follower_offset = 99,
+        },
+    };
+
+    var buffer: [4096]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buffer);
+    try serializeMessage(stream.writer(), original, allocator);
+
+    var read_stream = std.io.fixedBufferStream(stream.getWritten());
+    const deserialized = try deserializeMessage(read_stream.reader(), allocator);
+
+    try std.testing.expectEqual(@as(u64, 99), deserialized.heartbeat_response.follower_offset);
+}
+
+test "CatchUpRequest: serialize and deserialize" {
+    const allocator = std.testing.allocator;
+
+    const original = Message{
+        .catch_up_request = .{
+            .start_offset = 50,
+            .max_entries = 1000,
+        },
+    };
+
+    var buffer: [4096]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buffer);
+    try serializeMessage(stream.writer(), original, allocator);
+
+    var read_stream = std.io.fixedBufferStream(stream.getWritten());
+    const deserialized = try deserializeMessage(read_stream.reader(), allocator);
+
+    try std.testing.expectEqual(@as(u64, 50), deserialized.catch_up_request.start_offset);
+    try std.testing.expectEqual(@as(u32, 1000), deserialized.catch_up_request.max_entries);
+}
+
+test "CatchUpResponse: serialize and deserialize with multiple entries" {
+    const allocator = std.testing.allocator;
+
+    var entries = try allocator.alloc(ReplicatedEntry, 3);
+    defer allocator.free(entries);
+    entries[0] = ReplicatedEntry{ .offset = 10, .record = Record{ .key = "k1", .value = "v1" } };
+    entries[1] = ReplicatedEntry{ .offset = 11, .record = Record{ .key = "k2", .value = "v2" } };
+    entries[2] = ReplicatedEntry{ .offset = 12, .record = Record{ .key = null, .value = "v3" } };
+
+    const original = Message{
+        .catch_up_response = .{
+            .entries = entries,
+            .more = true,
+        },
+    };
+
+    var buffer: [8192]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buffer);
+    try serializeMessage(stream.writer(), original, allocator);
+
+    var read_stream = std.io.fixedBufferStream(stream.getWritten());
+    const deserialized = try deserializeMessage(read_stream.reader(), allocator);
+    defer {
+        for (deserialized.catch_up_response.entries) |entry| {
+            if (entry.record.key) |k| allocator.free(k);
+            allocator.free(entry.record.value);
+        }
+        allocator.free(deserialized.catch_up_response.entries);
+    }
+
+    try std.testing.expectEqual(@as(usize, 3), deserialized.catch_up_response.entries.len);
+    try std.testing.expectEqual(@as(u64, 10), deserialized.catch_up_response.entries[0].offset);
+    try std.testing.expectEqualStrings("k1", deserialized.catch_up_response.entries[0].record.key.?);
+    try std.testing.expectEqualStrings("v1", deserialized.catch_up_response.entries[0].record.value);
+    try std.testing.expectEqual(@as(u64, 12), deserialized.catch_up_response.entries[2].offset);
+    try std.testing.expect(deserialized.catch_up_response.entries[2].record.key == null);
+    try std.testing.expectEqual(true, deserialized.catch_up_response.more);
 }
 
 

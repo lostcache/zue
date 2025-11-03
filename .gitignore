@@ -2,5 +2,4 @@
 zig-out/
 *.o
 venv/
-wiki/
 benchmark_plots/

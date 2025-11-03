@@ -4,6 +4,8 @@ const LogConfig = @import("log/log.zig").LogConfig;
 const SegmentConfig = @import("log/segment.zig").SegmentConfig;
 const Protocol = @import("network/protocol.zig");
 const Record = @import("log/record.zig").Record;
+const EventLoop = @import("event_loop.zig").EventLoop;
+const EventHandlers = @import("event_loop.zig").EventHandlers;
 
 pub const ServerConfig = struct {
     port: u16 = 9000,
@@ -13,12 +15,19 @@ pub const ServerConfig = struct {
     nodelay: bool = true,
 };
 
+const ClientState = struct {
+    fd: std.posix.fd_t,
+    read_buffer: [65536]u8,
+};
+
 pub const Server = struct {
     config: ServerConfig,
     log: *Log,
     allocator: std.mem.Allocator,
     listener: ?std.net.Server,
     running: bool,
+    event_loop: EventLoop,
+    clients: std.AutoHashMap(std.posix.fd_t, *ClientState),
 
     pub fn init(config: ServerConfig, log: *Log, allocator: std.mem.Allocator) Server {
         return Server{
@@ -27,6 +36,8 @@ pub const Server = struct {
             .allocator = allocator,
             .listener = null,
             .running = false,
+            .event_loop = EventLoop.init(allocator, 2000),
+            .clients = std.AutoHashMap(std.posix.fd_t, *ClientState).init(allocator),
         };
     }
 
@@ -42,30 +53,99 @@ pub const Server = struct {
 
         std.debug.print("Zue server listening on {s}:{d}\n", .{ self.config.address, self.config.port });
 
-        while (self.running) {
-            const connection = self.listener.?.accept() catch |err| {
-                std.debug.print("Error accepting connection: {}\n", .{err});
-                continue;
-            };
+        try self.event_loop.registerSocket(self.listener.?.stream.handle, .listener);
 
-            self.handleConnection(connection) catch |err| {
-                std.debug.print("Error handling connection: {}\n", .{err});
-            };
+        const handlers = EventHandlers{
+            .onListenReady = onListenReady,
+            .onClientReady = onClientReady,
+            .onTimer = onTimer,
+            .context = self,
+        };
+
+        while (self.running) {
+            try self.event_loop.run(handlers, 100);
         }
     }
 
     pub fn stop(self: *Server) void {
         self.running = false;
+
+        var it = self.clients.iterator();
+        while (it.next()) |entry| {
+            std.posix.close(entry.key_ptr.*);
+            self.allocator.destroy(entry.value_ptr.*);
+        }
+        self.clients.deinit();
+
+        self.event_loop.deinit();
+
         if (self.listener) |*listener| {
             listener.deinit();
             self.listener = null;
         }
     }
 
-    // Helper to read a complete protocol message, handling partial reads
+    // ========================================================================
+    // Event Handlers
+    // ========================================================================
+
+    fn onListenReady(ctx: *anyopaque) !void {
+        const self: *Server = @ptrCast(@alignCast(ctx));
+
+        const connection = self.listener.?.accept() catch |err| {
+            std.debug.print("Error accepting connection: {}\n", .{err});
+            return;
+        };
+
+        std.debug.print("Client connected from {any}\n", .{connection.address});
+
+        const client_state = try self.allocator.create(ClientState);
+        client_state.* = .{
+            .fd = connection.stream.handle,
+            .read_buffer = undefined,
+        };
+
+        try self.clients.put(connection.stream.handle, client_state);
+
+        try self.event_loop.registerSocket(connection.stream.handle, .client);
+    }
+
+    fn onClientReady(ctx: *anyopaque, fd: std.posix.fd_t) !void {
+        const self: *Server = @ptrCast(@alignCast(ctx));
+
+        const client_state = self.clients.get(fd) orelse {
+            std.debug.print("Unknown client fd: {}\n", .{fd});
+            return;
+        };
+
+        self.handleClientMessage(fd, &client_state.read_buffer) catch |err| {
+            switch (err) {
+                error.EndOfStream, error.ConnectionResetByPeer => {
+                    std.debug.print("Client disconnected\n", .{});
+                },
+                else => {
+                    std.debug.print("Error handling client message: {}\n", .{err});
+                },
+            }
+            // Clean up client resources
+            // NOTE: event_loop.unregisterSocket() is called automatically by EventLoop.run()
+            // when this handler returns an error. We just handle our own cleanup here.
+            std.posix.close(fd);
+            _ = self.clients.remove(fd);
+            self.allocator.destroy(client_state);
+
+            // Return error to signal event loop to unregister this socket
+            return err;
+        };
+    }
+
+    fn onTimer(ctx: *anyopaque) !void {
+        _ = ctx;
+        std.debug.print("[TIMER] Event loop tick (2s interval)\n", .{});
+    }
+
     fn readCompleteMessage(socket_handle: std.posix.socket_t, buffer: []u8) ![]u8 {
 
-        // Read 4-byte length prefix
         var len_bytes: [4]u8 = undefined;
         var total_read: usize = 0;
         while (total_read < 4) {
@@ -78,7 +158,6 @@ pub const Server = struct {
 
         if (message_len > buffer.len) return error.MessageTooLarge;
 
-        // Read the message body (NOT including length prefix)
         total_read = 0;
         while (total_read < message_len) {
             const n = try std.posix.read(socket_handle, buffer[total_read..message_len]);
@@ -89,42 +168,20 @@ pub const Server = struct {
         return buffer[0..message_len];
     }
 
-    fn handleConnection(self: *Server, connection: std.net.Server.Connection) !void {
-        defer connection.stream.close();
+    fn handleClientMessage(self: *Server, socket_handle: std.posix.socket_t, read_buffer: []u8) !void {
+        const message_bytes = try readCompleteMessage(socket_handle, read_buffer);
 
-        std.debug.print("Client connected from {any}\n", .{connection.address});
+        var request_stream = std.io.fixedBufferStream(message_bytes);
+        const request_reader = request_stream.reader();
 
-        while (true) {
-            var read_buffer: [65536]u8 = undefined;
-            const message_bytes = readCompleteMessage(connection.stream.handle, &read_buffer) catch |err| {
-                switch (err) {
-                    error.EndOfStream => {
-                        std.debug.print("Client disconnected\n", .{});
-                        return;
-                    },
-                    error.ConnectionResetByPeer => {
-                        std.debug.print("Client disconnected (connection reset)\n", .{});
-                        return;
-                    },
-                    else => {
-                        std.debug.print("Error reading from socket: {}\n", .{err});
-                        return err;
-                    },
-                }
-            };
+        const request = Protocol.deserializeMessageBody(request_reader, self.allocator) catch |err| {
+            std.debug.print("Error deserializing message: {}\n", .{err});
+            try self.sendErrorResponseDirect(socket_handle, .invalid_message, "Failed to deserialize message");
+            return err;
+        };
+        defer self.freeMessage(request);
 
-            var request_stream = std.io.fixedBufferStream(message_bytes);
-            const request_reader = request_stream.reader();
-
-            const request = Protocol.deserializeMessageBody(request_reader, self.allocator) catch |err| {
-                std.debug.print("Error deserializing message: {}\n", .{err});
-                try self.sendErrorResponseDirect(connection.stream.handle, .invalid_message, "Failed to deserialize message");
-                return;
-            };
-            defer self.freeMessage(request);
-
-            try self.processRequest(request, connection.stream.handle);
-        }
+        try self.processRequest(request, socket_handle);
     }
 
     fn processRequest(self: *Server, request: Protocol.Message, socket_handle: std.posix.socket_t) !void {
@@ -229,7 +286,6 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    // Parse command-line arguments for port and log directory
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 

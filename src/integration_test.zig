@@ -56,7 +56,6 @@ fn waitForServer(port: u16) !void {
     return error.ServerDidNotStart;
 }
 
-/// Server process wrapper with improved error handling and timeout support
 const ServerProcess = struct {
     process: std.process.Child,
     port: u16,
@@ -450,4 +449,143 @@ test "integration: client disconnect and reconnect" {
         const offset2 = try client.append(record2);
         try testing.expect(offset2 > offset1);
     }
+}
+
+// ============================================================================
+// Phase 1.5: Event Loop Tests
+// ============================================================================
+
+test "integration: concurrent clients - event-driven server" {
+    const allocator = testing.allocator;
+    const config = TestConfig{};
+
+    var server = try ServerProcess.init(allocator, config);
+    defer server.deinit();
+
+    // Connect multiple clients simultaneously
+    var client1 = try server.getClient();
+    defer client1.disconnect();
+
+    var client2 = try server.getClient();
+    defer client2.disconnect();
+
+    var client3 = try server.getClient();
+    defer client3.disconnect();
+
+    // All three clients can write concurrently
+    const record1 = Record{ .key = "client1", .value = "concurrent-1" };
+    const offset1 = try client1.append(record1);
+
+    const record2 = Record{ .key = "client2", .value = "concurrent-2" };
+    const offset2 = try client2.append(record2);
+
+    const record3 = Record{ .key = "client3", .value = "concurrent-3" };
+    const offset3 = try client3.append(record3);
+
+    // Each client can read any offset
+    {
+        const read = try client1.read(offset2);
+        defer {
+            if (read.key) |k| allocator.free(k);
+            allocator.free(read.value);
+        }
+        try testing.expectEqualStrings("client2", read.key.?);
+    }
+
+    {
+        const read = try client2.read(offset3);
+        defer {
+            if (read.key) |k| allocator.free(k);
+            allocator.free(read.value);
+        }
+        try testing.expectEqualStrings("client3", read.key.?);
+    }
+
+    {
+        const read = try client3.read(offset1);
+        defer {
+            if (read.key) |k| allocator.free(k);
+            allocator.free(read.value);
+        }
+        try testing.expectEqualStrings("client1", read.key.?);
+    }
+}
+
+test "integration: interleaved operations from multiple clients" {
+    const allocator = testing.allocator;
+    const config = TestConfig{};
+
+    var server = try ServerProcess.init(allocator, config);
+    defer server.deinit();
+
+    // Connect two clients
+    var client1 = try server.getClient();
+    defer client1.disconnect();
+
+    var client2 = try server.getClient();
+    defer client2.disconnect();
+
+    // Interleave operations: client1 write, client2 write, client1 read, client2 read
+    const record1 = Record{ .key = "interleaved1", .value = "data1" };
+    const offset1 = try client1.append(record1);
+
+    const record2 = Record{ .key = "interleaved2", .value = "data2" };
+    const offset2 = try client2.append(record2);
+
+    // Client1 reads client2's data
+    {
+        const read = try client1.read(offset2);
+        defer {
+            if (read.key) |k| allocator.free(k);
+            allocator.free(read.value);
+        }
+        try testing.expectEqualStrings("interleaved2", read.key.?);
+        try testing.expectEqualStrings("data2", read.value);
+    }
+
+    // Client2 reads client1's data
+    {
+        const read = try client2.read(offset1);
+        defer {
+            if (read.key) |k| allocator.free(k);
+            allocator.free(read.value);
+        }
+        try testing.expectEqualStrings("interleaved1", read.key.?);
+        try testing.expectEqualStrings("data1", read.value);
+    }
+}
+
+test "integration: rapid client connect/disconnect - regression test for collection modification bug" {
+    // This test specifically validates the fix for the critical bug where
+    // unregisterSocket was called during iteration, causing undefined behavior.
+    const allocator = testing.allocator;
+    const config = TestConfig{};
+
+    var server = try ServerProcess.init(allocator, config);
+    defer server.deinit();
+
+    // Rapidly connect and disconnect multiple clients
+    // This would trigger the bug if unregisterSocket modifies the list during iteration
+    var i: usize = 0;
+    while (i < 5) : (i += 1) {
+        var client = try server.getClient();
+        const record = Record{ .key = "rapid", .value = "test" };
+        _ = try client.append(record);
+        client.disconnect(); // This triggers unregisterSocket
+    }
+
+    // Verify server is still healthy by connecting a new client
+    var final_client = try server.getClient();
+    defer final_client.disconnect();
+
+    const record = Record{ .key = "final", .value = "healthy" };
+    const offset = try final_client.append(record);
+
+    const read = try final_client.read(offset);
+    defer {
+        if (read.key) |k| allocator.free(k);
+        allocator.free(read.value);
+    }
+    try testing.expectEqualStrings("final", read.key.?);
+    try testing.expectEqualStrings("healthy", read.value);
 }
