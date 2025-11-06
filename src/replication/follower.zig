@@ -64,30 +64,35 @@ pub const Follower = struct {
         self: *Follower,
         req: ReplicateRequest,
     ) !ReplicateResponse {
-        // CRITICAL: Validate req.offset == self.log.next_offset
-        const expected_offset = self.log.next_offset;
+        // Handle batch of entries (streaming replication)
+        var last_offset: ?u64 = if (self.log.next_offset > 0) self.log.next_offset - 1 else null;
 
-        if (req.offset != expected_offset) {
-            // GAP DETECTED: Enter catching-up state
-            self.state = .catching_up;
+        for (req.entries) |entry| {
+            // CRITICAL: Validate entry.offset == self.log.next_offset
+            const expected_offset = self.log.next_offset;
 
-            // Return error to leader so it knows we're out of sync
-            return ReplicateResponse{
-                .success = false,
-                .follower_offset = if (self.log.next_offset > 0) self.log.next_offset - 1 else 0,
-                .error_code = .offset_mismatch,
-            };
+            if (entry.offset != expected_offset) {
+                // GAP DETECTED: Enter catching-up state
+                self.state = .catching_up;
+
+                // Return error to leader so it knows we're out of sync
+                return ReplicateResponse{
+                    .success = false,
+                    .follower_offset = last_offset,
+                    .error_code = .offset_mismatch,
+                };
+            }
+
+            // Normal path: append and track offset
+            last_offset = try self.log.append(entry.record);
         }
-
-        // Normal path: append and return success
-        const offset = try self.log.append(req.record);
 
         // Update commit index from leader
         self.commit_index = req.leader_commit;
 
         return ReplicateResponse{
             .success = true,
-            .follower_offset = offset,
+            .follower_offset = last_offset,
             .error_code = @enumFromInt(0), // .none - using raw value for compatibility
         };
     }
@@ -101,19 +106,21 @@ pub const Follower = struct {
         self.commit_index = req.leader_commit; // Advance commit index
 
         // If follower is behind leader, enter catching_up state
-        // leader_offset is the last offset written by leader
-        // next_offset is the next offset follower will write
-        // If next_offset <= leader_offset, follower is missing data
-        if (self.log.next_offset <= req.leader_offset) {
-            std.debug.print("[FOLLOWER] Behind leader (leader_offset={}, follower_next={}), entering catch-up mode\n", .{
-                req.leader_offset,
-                self.log.next_offset,
-            });
+        // req.leader_offset is now the leader's next_offset (not last offset)
+        // This makes comparison unambiguous: follower is behind if next_offset < leader_next_offset
+        // Empty logs: 0 < 0 = false (both in sync)
+        // Follower behind: 0 < 1 = true (needs catch-up)
+        // Caught up: 1 < 1 = false (in sync)
+        if (self.log.next_offset < req.leader_offset) {
+            // std.debug.print("[FOLLOWER] Behind leader (leader_next={}, follower_next={}), entering catch-up mode\n", .{
+            //     req.leader_offset,
+            //     self.log.next_offset,
+            // });
             self.state = .catching_up;
         }
 
         return HeartbeatResponse{
-            .follower_offset = if (self.log.next_offset > 0) self.log.next_offset - 1 else std.math.maxInt(u64),
+            .follower_offset = if (self.log.next_offset > 0) self.log.next_offset - 1 else null,
         };
     }
 
@@ -281,9 +288,12 @@ test "Follower: handleReplicateRequest - normal append" {
         .value = "test value 1",
     };
 
+    var entries1 = try allocator.alloc(protocol.ReplicatedEntry, 1);
+    defer allocator.free(entries1);
+    entries1[0] = protocol.ReplicatedEntry{ .offset = 0, .record = record1 };
+
     const req1 = ReplicateRequest{
-        .offset = 0,
-        .record = record1,
+        .entries = entries1,
         .leader_commit = 0,
     };
 
@@ -298,9 +308,12 @@ test "Follower: handleReplicateRequest - normal append" {
         .value = "test value 2",
     };
 
+    var entries2 = try allocator.alloc(protocol.ReplicatedEntry, 1);
+    defer allocator.free(entries2);
+    entries2[0] = protocol.ReplicatedEntry{ .offset = 1, .record = record2 };
+
     const req2 = ReplicateRequest{
-        .offset = 1,
-        .record = record2,
+        .entries = entries2,
         .leader_commit = 1,
     };
 
@@ -337,9 +350,12 @@ test "Follower: handleReplicateRequest - gap detection" {
         .value = "test value",
     };
 
+    var entries = try allocator.alloc(protocol.ReplicatedEntry, 1);
+    defer allocator.free(entries);
+    entries[0] = protocol.ReplicatedEntry{ .offset = 5, .record = record };
+
     const req = ReplicateRequest{
-        .offset = 5, // Gap!
-        .record = record,
+        .entries = entries,
         .leader_commit = 5,
     };
 
@@ -375,6 +391,8 @@ test "Follower: handleHeartbeat" {
     // Wait a bit
     std.Thread.sleep(10 * std.time.ns_per_ms);
 
+    // Send heartbeat with leader_offset = 100 (leader has 100 entries)
+    // Follower has 0 entries, so should enter catching_up state
     const req = HeartbeatRequest{
         .leader_commit = 42,
         .leader_offset = 100,
@@ -384,7 +402,10 @@ test "Follower: handleHeartbeat" {
 
     try std.testing.expect(follower.last_heartbeat_ms > initial_heartbeat);
     try std.testing.expectEqual(@as(u64, 42), follower.commit_index);
-    try std.testing.expectEqual(@as(u64, 0), resp.follower_offset); // Log is empty
+    // Empty log returns null
+    try std.testing.expectEqual(@as(?u64, null), resp.follower_offset);
+    // Should enter catching_up state because follower is behind
+    try std.testing.expectEqual(FollowerState.catching_up, follower.state);
 }
 
 test "Follower: isHealthy" {
@@ -449,9 +470,12 @@ test "Follower: needsCatchUp" {
         .value = "test",
     };
 
+    var entries = try allocator.alloc(protocol.ReplicatedEntry, 1);
+    defer allocator.free(entries);
+    entries[0] = protocol.ReplicatedEntry{ .offset = 10, .record = record };
+
     const req = ReplicateRequest{
-        .offset = 10, // Gap!
-        .record = record,
+        .entries = entries,
         .leader_commit = 10,
     };
 

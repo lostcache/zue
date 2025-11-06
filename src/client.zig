@@ -59,14 +59,14 @@ pub const Client = struct {
 
         self.stream = stream;
 
-        std.debug.print("Connected to Zue server at {s}:{d}\n", .{ self.host, self.port });
+        // std.debug.print("Connected to Zue server at {s}:{d}\n", .{ self.host, self.port });
     }
 
     pub fn disconnect(self: *Client) void {
         if (self.stream) |stream| {
             stream.close();
             self.stream = null;
-            std.debug.print("Disconnected from server\n", .{});
+            // std.debug.print("Disconnected from server\n", .{});
         }
     }
 

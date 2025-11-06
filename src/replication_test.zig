@@ -477,3 +477,89 @@ test "replication: follower catch-up after restart" {
 
     std.debug.print("✓ Test 4 passed: Follower catch-up works after restart\n", .{});
 }
+
+test "replication: follower auto-recovery on offset_mismatch" {
+    const allocator = testing.allocator;
+
+    var cluster = try ReplicationCluster.init(allocator, 2);
+    defer cluster.deinit();
+
+    // Give the cluster time to establish connections
+    std.Thread.sleep(5 * std.time.ns_per_s);
+
+    // Connect to leader
+    var leader_client = try cluster.getLeaderClient();
+    defer leader_client.disconnect();
+
+    // Write some initial records (all nodes in sync)
+    const record1 = Record{ .key = "init", .value = "entry1" };
+    const offset1 = try leader_client.append(record1);
+    try testing.expectEqual(@as(u64, 0), offset1);
+
+    const record2 = Record{ .key = "init", .value = "entry2" };
+    const offset2 = try leader_client.append(record2);
+    try testing.expectEqual(@as(u64, 1), offset2);
+
+    std.Thread.sleep(500 * std.time.ns_per_ms);
+    std.debug.print("Wrote 2 initial records to all nodes\n", .{});
+
+    // Kill follower 0
+    try cluster.killFollower(0);
+    std.debug.print("Killed follower 0\n", .{});
+
+    // Wait for leader to detect failure
+    std.Thread.sleep(3 * std.time.ns_per_s);
+
+    // Write more records while follower is down (creates gap)
+    const record3 = Record{ .key = "gap", .value = "entry3" };
+    const offset3 = try leader_client.append(record3);
+    try testing.expectEqual(@as(u64, 2), offset3);
+
+    const record4 = Record{ .key = "gap", .value = "entry4" };
+    const offset4 = try leader_client.append(record4);
+    try testing.expectEqual(@as(u64, 3), offset4);
+
+    std.debug.print("Wrote 2 more records while follower was down (offsets 2-3)\n", .{});
+
+    // Restart follower 0 - it will be behind
+    try cluster.restartFollower(0);
+    std.debug.print("Restarted follower 0 (currently at offset 1, leader at offset 3)\n", .{});
+
+    // Wait a bit for follower to start
+    std.Thread.sleep(2 * std.time.ns_per_s);
+
+    // Now write a NEW entry that will trigger offset_mismatch
+    // Leader will try to send offset 4, but follower expects offset 2
+    const record5 = Record{ .key = "trigger", .value = "offset_mismatch" };
+    const offset5 = try leader_client.append(record5);
+    try testing.expectEqual(@as(u64, 4), offset5);
+
+    std.debug.print("Wrote new record (offset 4) - should trigger offset_mismatch and auto-repair\n", .{});
+
+    // Give time for auto-repair to complete (this is where repair logic runs)
+    std.Thread.sleep(5 * std.time.ns_per_s);
+
+    // Verify follower 0 has ALL records including the trigger entry
+    {
+        const record = try cluster.readFromFollowerLog(0, offset5, allocator);
+        defer {
+            if (record.key) |k| allocator.free(k);
+            allocator.free(record.value);
+        }
+        try testing.expectEqualStrings("trigger", record.key.?);
+        try testing.expectEqualStrings("offset_mismatch", record.value);
+    }
+
+    // Also verify follower has the gap entries (2 and 3)
+    {
+        const record = try cluster.readFromFollowerLog(0, offset3, allocator);
+        defer {
+            if (record.key) |k| allocator.free(k);
+            allocator.free(record.value);
+        }
+        try testing.expectEqualStrings("gap", record.key.?);
+        try testing.expectEqualStrings("entry3", record.value);
+    }
+
+    std.debug.print("✓ Test 5 passed: Follower auto-recovered from offset_mismatch\n", .{});
+}

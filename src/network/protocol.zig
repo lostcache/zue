@@ -73,15 +73,19 @@ pub const ErrorResponse = struct {
 // Replication Protocol Messages
 // ============================================================================
 
+pub const ReplicatedEntry = struct {
+    offset: u64,
+    record: Record,
+};
+
 pub const ReplicateRequest = struct {
-    offset: u64,           // Expected offset on follower (for gap detection)
-    record: Record,        // The record to replicate
-    leader_commit: u64,    // Leader's commit index (for follower to advance)
+    entries: []ReplicatedEntry,  // One or more entries to replicate (with their offsets)
+    leader_commit: u64,           // Leader's commit index (for follower to advance)
 };
 
 pub const ReplicateResponse = struct {
     success: bool,
-    follower_offset: u64,   // Follower's current last offset
+    follower_offset: ?u64,   // Follower's current last offset (null if log is empty)
     error_code: ErrorCode,  // Error code on failure
 };
 
@@ -91,17 +95,12 @@ pub const HeartbeatRequest = struct {
 };
 
 pub const HeartbeatResponse = struct {
-    follower_offset: u64,  // Follower's last offset
+    follower_offset: ?u64,  // Follower's last offset (null if log is empty)
 };
 
 pub const CatchUpRequest = struct {
     start_offset: u64,     // Follower's current offset + 1
     max_entries: u32,      // Max entries to send in one response
-};
-
-pub const ReplicatedEntry = struct {
-    offset: u64,
-    record: Record,
 };
 
 pub const CatchUpResponse = struct {
@@ -773,53 +772,92 @@ test "serializeErrorResponse and deserializeErrorResponse" {
 // ============================================================================
 
 fn serializeReplicateRequest(writer: anytype, req: ReplicateRequest) !void {
-    try writeIntBinary(writer, u64, req.offset, .little);
     try writeIntBinary(writer, u64, req.leader_commit, .little);
-    // Serialize record (same as AppendRequest)
-    if (req.record.key) |key| {
-        const key_len: i32 = @intCast(key.len);
-        try writeIntBinary(writer, i32, key_len, .little);
-        try writer.writeAll(key);
-    } else {
-        try writeIntBinary(writer, i32, -1, .little);
+
+    // Serialize entry count
+    const entry_count: u32 = @intCast(req.entries.len);
+    try writeIntBinary(writer, u32, entry_count, .little);
+
+    // Serialize each entry
+    for (req.entries) |entry| {
+        try writeIntBinary(writer, u64, entry.offset, .little);
+        // Serialize record
+        if (entry.record.key) |key| {
+            const key_len: i32 = @intCast(key.len);
+            try writeIntBinary(writer, i32, key_len, .little);
+            try writer.writeAll(key);
+        } else {
+            try writeIntBinary(writer, i32, -1, .little);
+        }
+        const value_len: i32 = @intCast(entry.record.value.len);
+        try writeIntBinary(writer, i32, value_len, .little);
+        try writer.writeAll(entry.record.value);
     }
-    const value_len: i32 = @intCast(req.record.value.len);
-    try writeIntBinary(writer, i32, value_len, .little);
-    try writer.writeAll(req.record.value);
 }
 
 fn deserializeReplicateRequest(reader: anytype, allocator: std.mem.Allocator) !ReplicateRequest {
-    const offset = try readIntFromBinary(reader, u64, .little);
     const leader_commit = try readIntFromBinary(reader, u64, .little);
+    const entry_count = try readIntFromBinary(reader, u32, .little);
 
-    // Deserialize record
-    const key_len = try readIntFromBinary(reader, i32, .little);
-    const key: ?[]const u8 = if (key_len >= 0) blk: {
-        const k = try allocator.alloc(u8, @intCast(key_len));
-        try readFull(reader, k);
-        break :blk k;
-    } else null;
-
-    const value_len = try readIntFromBinary(reader, i32, .little);
-    if (value_len < 0) {
-        if (key) |k| allocator.free(k);
-        return ProtocolError.DeserializationError;
+    var entries = try std.ArrayList(ReplicatedEntry).initCapacity(allocator, entry_count);
+    errdefer {
+        for (entries.items) |entry| {
+            if (entry.record.key) |k| allocator.free(k);
+            allocator.free(entry.record.value);
+        }
+        entries.deinit(allocator);
     }
 
-    const value = try allocator.alloc(u8, @intCast(value_len));
-    try readFull(reader, value);
+    var i: u32 = 0;
+    while (i < entry_count) : (i += 1) {
+        const offset = try readIntFromBinary(reader, u64, .little);
+
+        // Deserialize record
+        const key_len = try readIntFromBinary(reader, i32, .little);
+        const key: ?[]const u8 = if (key_len >= 0) blk: {
+            const k = try allocator.alloc(u8, @intCast(key_len));
+            try readFull(reader, k);
+            break :blk k;
+        } else null;
+
+        const value_len = try readIntFromBinary(reader, i32, .little);
+        if (value_len < 0) {
+            if (key) |k| allocator.free(k);
+            for (entries.items) |entry| {
+                if (entry.record.key) |k| allocator.free(k);
+                allocator.free(entry.record.value);
+            }
+            entries.deinit(allocator);
+            return ProtocolError.DeserializationError;
+        }
+
+        const value = try allocator.alloc(u8, @intCast(value_len));
+        try readFull(reader, value);
+
+        try entries.append(allocator, ReplicatedEntry{
+            .offset = offset,
+            .record = Record{ .key = key, .value = value },
+        });
+    }
 
     return ReplicateRequest{
-        .offset = offset,
+        .entries = try entries.toOwnedSlice(allocator),
         .leader_commit = leader_commit,
-        .record = Record{ .key = key, .value = value },
     };
 }
 
 fn serializeReplicateResponse(writer: anytype, res: ReplicateResponse) !void {
     const success_byte: u8 = if (res.success) 1 else 0;
     try writer.writeAll(&[_]u8{success_byte});
-    try writeIntBinary(writer, u64, res.follower_offset, .little);
+
+    // Serialize optional follower_offset
+    if (res.follower_offset) |offset| {
+        try writer.writeAll(&[_]u8{1}); // Present flag
+        try writeIntBinary(writer, u64, offset, .little);
+    } else {
+        try writer.writeAll(&[_]u8{0}); // Null flag
+    }
+
     const error_code_byte = @intFromEnum(res.error_code);
     try writer.writeAll(&[_]u8{error_code_byte});
 }
@@ -829,7 +867,13 @@ fn deserializeReplicateResponse(reader: anytype) !ReplicateResponse {
     try readFull(reader, &success_bytes);
     const success = success_bytes[0] != 0;
 
-    const follower_offset = try readIntFromBinary(reader, u64, .little);
+    // Deserialize optional follower_offset
+    var has_offset_bytes: [1]u8 = undefined;
+    try readFull(reader, &has_offset_bytes);
+    const follower_offset: ?u64 = if (has_offset_bytes[0] == 1)
+        try readIntFromBinary(reader, u64, .little)
+    else
+        null;
 
     var error_code_bytes: [1]u8 = undefined;
     try readFull(reader, &error_code_bytes);
@@ -855,12 +899,26 @@ fn deserializeHeartbeatRequest(reader: anytype) !HeartbeatRequest {
 }
 
 fn serializeHeartbeatResponse(writer: anytype, res: HeartbeatResponse) !void {
-    try writeIntBinary(writer, u64, res.follower_offset, .little);
+    // Serialize optional follower_offset
+    if (res.follower_offset) |offset| {
+        try writer.writeAll(&[_]u8{1}); // Present flag
+        try writeIntBinary(writer, u64, offset, .little);
+    } else {
+        try writer.writeAll(&[_]u8{0}); // Null flag
+    }
 }
 
 fn deserializeHeartbeatResponse(reader: anytype) !HeartbeatResponse {
+    // Deserialize optional follower_offset
+    var has_offset_bytes: [1]u8 = undefined;
+    try readFull(reader, &has_offset_bytes);
+    const follower_offset: ?u64 = if (has_offset_bytes[0] == 1)
+        try readIntFromBinary(reader, u64, .little)
+    else
+        null;
+
     return HeartbeatResponse{
-        .follower_offset = try readIntFromBinary(reader, u64, .little),
+        .follower_offset = follower_offset,
     };
 }
 
@@ -957,11 +1015,21 @@ fn deserializeCatchUpResponse(reader: anytype, allocator: std.mem.Allocator) !Ca
 test "ReplicateRequest: serialize and deserialize" {
     const allocator = std.testing.allocator;
 
+    var entries = try allocator.alloc(ReplicatedEntry, 2);
+    defer allocator.free(entries);
+    entries[0] = ReplicatedEntry{
+        .offset = 42,
+        .record = Record{ .key = "test-key-1", .value = "test-value-1" },
+    };
+    entries[1] = ReplicatedEntry{
+        .offset = 43,
+        .record = Record{ .key = "test-key-2", .value = "test-value-2" },
+    };
+
     const original = Message{
         .replicate_request = .{
-            .offset = 42,
+            .entries = entries,
             .leader_commit = 41,
-            .record = Record{ .key = "test-key", .value = "test-value" },
         },
     };
 
@@ -972,14 +1040,21 @@ test "ReplicateRequest: serialize and deserialize" {
     var read_stream = std.io.fixedBufferStream(stream.getWritten());
     const deserialized = try deserializeMessage(read_stream.reader(), allocator);
     defer {
-        if (deserialized.replicate_request.record.key) |k| allocator.free(k);
-        allocator.free(deserialized.replicate_request.record.value);
+        for (deserialized.replicate_request.entries) |entry| {
+            if (entry.record.key) |k| allocator.free(k);
+            allocator.free(entry.record.value);
+        }
+        allocator.free(deserialized.replicate_request.entries);
     }
 
-    try std.testing.expectEqual(@as(u64, 42), deserialized.replicate_request.offset);
     try std.testing.expectEqual(@as(u64, 41), deserialized.replicate_request.leader_commit);
-    try std.testing.expectEqualStrings("test-key", deserialized.replicate_request.record.key.?);
-    try std.testing.expectEqualStrings("test-value", deserialized.replicate_request.record.value);
+    try std.testing.expectEqual(@as(usize, 2), deserialized.replicate_request.entries.len);
+    try std.testing.expectEqual(@as(u64, 42), deserialized.replicate_request.entries[0].offset);
+    try std.testing.expectEqualStrings("test-key-1", deserialized.replicate_request.entries[0].record.key.?);
+    try std.testing.expectEqualStrings("test-value-1", deserialized.replicate_request.entries[0].record.value);
+    try std.testing.expectEqual(@as(u64, 43), deserialized.replicate_request.entries[1].offset);
+    try std.testing.expectEqualStrings("test-key-2", deserialized.replicate_request.entries[1].record.key.?);
+    try std.testing.expectEqualStrings("test-value-2", deserialized.replicate_request.entries[1].record.value);
 }
 
 test "ReplicateResponse: serialize and deserialize" {

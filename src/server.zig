@@ -169,7 +169,7 @@ pub const Server = struct {
             return;
         };
 
-        std.debug.print("Client connected from {any}\n", .{connection.address});
+        // std.debug.print("Client connected from {any}\n", .{connection.address});
 
         const client_state = try self.allocator.create(ClientState);
         client_state.* = .{
@@ -193,7 +193,7 @@ pub const Server = struct {
         self.handleClientMessage(fd, &client_state.read_buffer) catch |err| {
             switch (err) {
                 error.EndOfStream, error.ConnectionResetByPeer => {
-                    std.debug.print("Client disconnected\n", .{});
+                    // std.debug.print("Client disconnected\n", .{});
                 },
                 else => {
                     std.debug.print("Error handling client message: {}\n", .{err});
@@ -213,33 +213,22 @@ pub const Server = struct {
 
     fn onTimer(ctx: *anyopaque) !void {
         const self: *Server = @ptrCast(@alignCast(ctx));
-        std.debug.print("[TIMER] Event loop tick (2s interval)\n", .{});
 
         // If we're a leader, send heartbeats to all followers
         if (self.leader) |leader| {
-            std.debug.print("[LEADER] Sending heartbeats...\n", .{});
             leader.sendHeartbeats();
-            const isr_count = leader.countInSync() + 1; // +1 for leader
-            std.debug.print("[LEADER] Heartbeats sent. ISR: {d}/{d}, has_quorum: {}\n", .{
-                isr_count,
-                leader.quorum_size,
-                leader.hasQuorum(),
-            });
+
+            // Background repair: Process followers that need repair
+            _ = leader.tickRepair();
         }
 
         // If we're a follower in catching-up state, try to fetch more data
         if (self.follower) |follower| {
             if (follower.needsCatchUp()) {
-                std.debug.print("[FOLLOWER] Attempting catch-up...\n", .{});
-                const more = follower.tickCatchUp() catch |err| {
+                _ = follower.tickCatchUp() catch |err| {
                     std.debug.print("[FOLLOWER] Catch-up error: {}\n", .{err});
                     return;
                 };
-                if (more) {
-                    std.debug.print("[FOLLOWER] More data to catch up\n", .{});
-                } else {
-                    std.debug.print("[FOLLOWER] Catch-up complete!\n", .{});
-                }
             }
         }
     }
@@ -275,10 +264,10 @@ pub const Server = struct {
                     return;
                 }
 
-                std.debug.print("Processing append request (key={?s}, value_len={})\n", .{
-                    req.record.key,
-                    req.record.value.len,
-                });
+                // std.debug.print("Processing append request (key={?s}, value_len={})\n", .{
+                //     req.record.key,
+                //     req.record.value.len,
+                // });
 
                 // Leader mode: replicate to followers
                 const offset = if (self.leader) |leader| blk: {
@@ -292,7 +281,7 @@ pub const Server = struct {
                         }
                         return;
                     };
-                    std.debug.print("[LEADER] Replicated to quorum, offset={}\n", .{result_offset});
+                    // std.debug.print("[LEADER] Replicated to quorum, offset={}\n", .{result_offset});
                     break :blk result_offset;
                 } else blk: {
                     // Standalone mode (no cluster): just append locally
@@ -312,7 +301,7 @@ pub const Server = struct {
                 }, self.allocator);
                 _ = try std.posix.write(socket_handle, msg_stream.getWritten());
 
-                std.debug.print("Append successful, offset={}\n", .{offset});
+                // std.debug.print("Append successful, offset={}\n", .{offset});
             },
 
             .read_request => |req| {
@@ -354,10 +343,10 @@ pub const Server = struct {
                 }, self.allocator);
                 _ = try std.posix.write(socket_handle, msg_stream.getWritten());
 
-                std.debug.print("Read successful (key={?s}, value_len={})\n", .{
-                    record.key,
-                    record.value.len,
-                });
+                // std.debug.print("Read successful (key={?s}, value_len={})\n", .{
+                //     record.key,
+                //     record.value.len,
+                // });
             },
 
             .replicate_request => |req| {
@@ -368,10 +357,10 @@ pub const Server = struct {
                     return;
                 }
 
-                std.debug.print("[FOLLOWER] Received replication request (offset={}, leader_commit={})\n", .{
-                    req.offset,
-                    req.leader_commit,
-                });
+                // std.debug.print("[FOLLOWER] Received replication request (entries={}, leader_commit={})\n", .{
+                //     req.entries.len,
+                //     req.leader_commit,
+                // });
 
                 const resp = try self.follower.?.handleReplicateRequest(req);
 
@@ -383,11 +372,11 @@ pub const Server = struct {
                 }, self.allocator);
                 _ = try std.posix.write(socket_handle, msg_stream.getWritten());
 
-                if (resp.success) {
-                    std.debug.print("[FOLLOWER] Replicated successfully, follower_offset={}\n", .{resp.follower_offset});
-                } else {
-                    std.debug.print("[FOLLOWER] Replication failed, error_code={}\n", .{resp.error_code});
-                }
+                // if (resp.success) {
+                //     std.debug.print("[FOLLOWER] Replicated successfully, follower_offset={?}\n", .{resp.follower_offset});
+                // } else {
+                //     std.debug.print("[FOLLOWER] Replication failed, error_code={}\n", .{resp.error_code});
+                // }
             },
 
             .heartbeat_request => |req| {
@@ -398,10 +387,10 @@ pub const Server = struct {
                     return;
                 }
 
-                std.debug.print("[FOLLOWER] Received heartbeat (leader_commit={}, leader_offset={})\n", .{
-                    req.leader_commit,
-                    req.leader_offset,
-                });
+                // std.debug.print("[FOLLOWER] Received heartbeat (leader_commit={}, leader_offset={})\n", .{
+                //     req.leader_commit,
+                //     req.leader_offset,
+                // });
 
                 const resp = self.follower.?.handleHeartbeat(req);
 
@@ -413,7 +402,7 @@ pub const Server = struct {
                 }, self.allocator);
                 _ = try std.posix.write(socket_handle, msg_stream.getWritten());
 
-                std.debug.print("[FOLLOWER] Heartbeat acknowledged, follower_offset={}\n", .{resp.follower_offset});
+                // std.debug.print("[FOLLOWER] Heartbeat acknowledged, follower_offset={?}\n", .{resp.follower_offset});
             },
 
             .catch_up_request => |req| {
@@ -424,10 +413,10 @@ pub const Server = struct {
                     return;
                 }
 
-                std.debug.print("[LEADER] Received catch-up request (start_offset={}, max_entries={})\n", .{
-                    req.start_offset,
-                    req.max_entries,
-                });
+                // std.debug.print("[LEADER] Received catch-up request (start_offset={}, max_entries={})\n", .{
+                //     req.start_offset,
+                //     req.max_entries,
+                // });
 
                 // Handle empty log case
                 var entries: []Protocol.ReplicatedEntry = undefined;
@@ -488,10 +477,10 @@ pub const Server = struct {
                 }, self.allocator);
                 _ = try std.posix.write(socket_handle, msg_stream.getWritten());
 
-                std.debug.print("[LEADER] Sent catch-up response ({} entries, more={})\n", .{
-                    entries.len,
-                    more,
-                });
+                // std.debug.print("[LEADER] Sent catch-up response ({} entries, more={})\n", .{
+                //     entries.len,
+                //     more,
+                // });
             },
 
             else => {
