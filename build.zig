@@ -159,6 +159,23 @@ pub fn build(b: *std.Build) void {
     const integration_test_step = b.step("test-integration", "Run integration tests (spawns server subprocess)");
     integration_test_step.dependOn(&run_integration_tests.step);
 
+    // Replication integration tests - spawn multi-node cluster and test replication
+    const replication_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/replication_test.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+
+    const run_replication_tests = b.addRunArtifact(replication_tests);
+
+    // Replication tests depend on server being built first
+    run_replication_tests.step.dependOn(b.getInstallStep());
+
+    const replication_test_step = b.step("test-replication", "Run replication integration tests (spawns multi-node cluster)");
+    replication_test_step.dependOn(&run_replication_tests.step);
+
     // Benchmark executable
     const bench_exe = b.addExecutable(.{
         .name = "bench",

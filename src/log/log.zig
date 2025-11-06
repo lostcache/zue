@@ -135,7 +135,11 @@ pub const Log = struct {
 
     pub fn read(self: *Log, offset: u64, allocator: std.mem.Allocator) !Record {
         const seg = self.findSegmentForOffset(offset) orelse return error.OffsetNotFound;
-        return try seg.read(offset, allocator);
+        return seg.read(offset, allocator) catch |err| {
+            // Map OffsetOutOfBounds from segment to OffsetNotFound at log level
+            if (err == error.OffsetOutOfBounds) return error.OffsetNotFound;
+            return err;
+        };
     }
 
     /// Read a range of records starting from start_offset
@@ -230,6 +234,41 @@ pub const Log = struct {
         }
 
         return segments_removed;
+    }
+
+    /// Truncate the log to a specific offset (exclusive)
+    /// All entries at offset >= new_next_offset will be removed
+    /// This is used to rollback uncommitted writes
+    /// WARNING: This is a destructive operation and should only be used for
+    /// rolling back uncommitted entries (e.g., when quorum fails)
+    pub fn truncateToOffset(self: *Log, new_next_offset: u64) !void {
+        if (new_next_offset > self.next_offset) {
+            return error.InvalidTruncateOffset;
+        }
+
+        if (new_next_offset == self.next_offset) {
+            return; // Nothing to truncate
+        }
+
+        // For Phase 2 simplification: We only support truncating within the active segment
+        const active_segment = &self.segments.items[self.active_segment_index];
+
+        if (new_next_offset < active_segment.base_offset) {
+            // Would need to truncate across segments - not supported in Phase 2
+            return error.TruncateAcrossSegmentsNotSupported;
+        }
+
+        // Calculate the new relative offset for the active segment
+        const new_relative_offset = @as(u32, @intCast(new_next_offset - active_segment.base_offset));
+
+        // Update segment's next_relative_offset
+        // NOTE: This leaves stale data in the log file, but we don't read past next_relative_offset
+        // A full implementation would truncate the actual file, but for Phase 2 this is acceptable
+        // since we never read uncommitted data
+        active_segment.next_relative_offset = new_relative_offset;
+
+        // Update log's next_offset
+        self.next_offset = new_next_offset;
     }
 
 
@@ -795,4 +834,71 @@ test {
     std.testing.refAllDecls(record);
     std.testing.refAllDecls(log_index);
     std.testing.refAllDecls(segment);
+}
+
+test "Log: truncateToOffset removes uncommitted entries" {
+    const test_dir = "test_log_truncate_to_offset";
+    defer std.fs.cwd().deleteTree(test_dir) catch {};
+
+    const abs_path = try std.fs.cwd().realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(abs_path);
+
+    const log_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/{s}", .{ abs_path, test_dir });
+    defer std.testing.allocator.free(log_path);
+
+    const config = LogConfig.default();
+    var log = try Log.create(config, log_path, std.testing.allocator);
+    defer log.delete() catch {};
+
+    // Append 3 records
+    const offset0 = try log.append(Record{ .key = "k0", .value = "v0" });
+    const offset1 = try log.append(Record{ .key = "k1", .value = "v1" });
+    const offset2 = try log.append(Record{ .key = "k2", .value = "v2" });
+
+    try std.testing.expectEqual(@as(u64, 0), offset0);
+    try std.testing.expectEqual(@as(u64, 1), offset1);
+    try std.testing.expectEqual(@as(u64, 2), offset2);
+    try std.testing.expectEqual(@as(u64, 3), log.getNextOffset());
+
+    // Truncate to offset 1 (removes offsets 1 and 2)
+    try log.truncateToOffset(1);
+
+    // Verify next_offset is now 1
+    try std.testing.expectEqual(@as(u64, 1), log.getNextOffset());
+
+    // Verify we can still read offset 0
+    const rec0 = try log.read(0, std.testing.allocator);
+    defer {
+        if (rec0.key) |k| std.testing.allocator.free(k);
+        std.testing.allocator.free(rec0.value);
+    }
+    try std.testing.expectEqualStrings("v0", rec0.value);
+
+    // Verify offsets 1 and 2 are no longer accessible
+    try std.testing.expectError(error.OffsetNotFound, log.read(1, std.testing.allocator));
+    try std.testing.expectError(error.OffsetNotFound, log.read(2, std.testing.allocator));
+
+    // Verify we can append again at offset 1
+    const new_offset1 = try log.append(Record{ .key = "k1_new", .value = "v1_new" });
+    try std.testing.expectEqual(@as(u64, 1), new_offset1);
+}
+
+test "Log: truncateToOffset with invalid offset returns error" {
+    const test_dir = "test_log_truncate_invalid";
+    defer std.fs.cwd().deleteTree(test_dir) catch {};
+
+    const abs_path = try std.fs.cwd().realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(abs_path);
+
+    const log_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/{s}", .{ abs_path, test_dir });
+    defer std.testing.allocator.free(log_path);
+
+    const config = LogConfig.default();
+    var log = try Log.create(config, log_path, std.testing.allocator);
+    defer log.delete() catch {};
+
+    _ = try log.append(Record{ .key = "k0", .value = "v0" });
+
+    // Try to truncate to an offset beyond next_offset
+    try std.testing.expectError(error.InvalidTruncateOffset, log.truncateToOffset(10));
 }

@@ -6,6 +6,11 @@ const Protocol = @import("network/protocol.zig");
 const Record = @import("log/record.zig").Record;
 const EventLoop = @import("event_loop.zig").EventLoop;
 const EventHandlers = @import("event_loop.zig").EventHandlers;
+const config_module = @import("config.zig");
+const ClusterConfig = config_module.ClusterConfig;
+const NodeRole = config_module.NodeRole;
+const Follower = @import("replication/follower.zig").Follower;
+const Leader = @import("replication/leader.zig").Leader;
 
 pub const ServerConfig = struct {
     port: u16 = 9000,
@@ -29,6 +34,12 @@ pub const Server = struct {
     event_loop: EventLoop,
     clients: std.AutoHashMap(std.posix.fd_t, *ClientState),
 
+    // Replication fields
+    cluster_config: ?*ClusterConfig,
+    role: NodeRole,
+    follower: ?*Follower,
+    leader: ?*Leader,
+
     pub fn init(config: ServerConfig, log: *Log, allocator: std.mem.Allocator) Server {
         return Server{
             .config = config,
@@ -38,7 +49,49 @@ pub const Server = struct {
             .running = false,
             .event_loop = EventLoop.init(allocator, 2000),
             .clients = std.AutoHashMap(std.posix.fd_t, *ClientState).init(allocator),
+            .cluster_config = null,
+            .role = .leader, // Default to leader for standalone mode
+            .follower = null,
+            .leader = null,
         };
+    }
+
+    /// Initialize server with cluster configuration
+    pub fn initWithCluster(
+        config: ServerConfig,
+        log: *Log,
+        cluster_config: *ClusterConfig,
+        node_id: u32,
+        allocator: std.mem.Allocator,
+    ) !Server {
+        var server = init(config, log, allocator);
+        server.cluster_config = cluster_config;
+
+        // Find this node's role in the cluster
+        for (cluster_config.nodes) |node| {
+            if (node.id == node_id) {
+                server.role = node.role;
+
+                // If follower, initialize Follower struct
+                if (node.role == .follower) {
+                    const leader_node = cluster_config.getLeader() orelse return error.NoLeaderConfigured;
+                    const follower = try allocator.create(Follower);
+                    follower.* = try Follower.init(log, leader_node.address, leader_node.port, allocator);
+                    server.follower = follower;
+                }
+
+                // If leader, initialize Leader struct
+                if (node.role == .leader) {
+                    const leader = try allocator.create(Leader);
+                    leader.* = try Leader.init(allocator, log, cluster_config.*);
+                    server.leader = leader;
+                }
+
+                break;
+            }
+        }
+
+        return server;
     }
 
     pub fn start(self: *Server) !void {
@@ -52,6 +105,13 @@ pub const Server = struct {
         self.running = true;
 
         std.debug.print("Zue server listening on {s}:{d}\n", .{ self.config.address, self.config.port });
+
+        // If leader, connect to all followers
+        if (self.leader) |leader| {
+            std.debug.print("[LEADER] Connecting to followers...\n", .{});
+            leader.connectToFollowers();
+            std.debug.print("[LEADER] Connected to {d} followers\n", .{leader.followers.len});
+        }
 
         try self.event_loop.registerSocket(self.listener.?.stream.handle, .listener);
 
@@ -82,6 +142,18 @@ pub const Server = struct {
         if (self.listener) |*listener| {
             listener.deinit();
             self.listener = null;
+        }
+
+        // Clean up follower if present
+        if (self.follower) |follower| {
+            follower.deinit();
+            self.allocator.destroy(follower);
+        }
+
+        // Clean up leader if present
+        if (self.leader) |leader| {
+            leader.deinit();
+            self.allocator.destroy(leader);
         }
     }
 
@@ -140,36 +212,40 @@ pub const Server = struct {
     }
 
     fn onTimer(ctx: *anyopaque) !void {
-        _ = ctx;
+        const self: *Server = @ptrCast(@alignCast(ctx));
         std.debug.print("[TIMER] Event loop tick (2s interval)\n", .{});
-    }
 
-    fn readCompleteMessage(socket_handle: std.posix.socket_t, buffer: []u8) ![]u8 {
-
-        var len_bytes: [4]u8 = undefined;
-        var total_read: usize = 0;
-        while (total_read < 4) {
-            const n = try std.posix.read(socket_handle, len_bytes[total_read..]);
-            if (n == 0) return error.EndOfStream;
-            total_read += n;
+        // If we're a leader, send heartbeats to all followers
+        if (self.leader) |leader| {
+            std.debug.print("[LEADER] Sending heartbeats...\n", .{});
+            leader.sendHeartbeats();
+            const isr_count = leader.countInSync() + 1; // +1 for leader
+            std.debug.print("[LEADER] Heartbeats sent. ISR: {d}/{d}, has_quorum: {}\n", .{
+                isr_count,
+                leader.quorum_size,
+                leader.hasQuorum(),
+            });
         }
 
-        const message_len = std.mem.readInt(u32, &len_bytes, .little);
-
-        if (message_len > buffer.len) return error.MessageTooLarge;
-
-        total_read = 0;
-        while (total_read < message_len) {
-            const n = try std.posix.read(socket_handle, buffer[total_read..message_len]);
-            if (n == 0) return error.UnexpectedEndOfStream;
-            total_read += n;
+        // If we're a follower in catching-up state, try to fetch more data
+        if (self.follower) |follower| {
+            if (follower.needsCatchUp()) {
+                std.debug.print("[FOLLOWER] Attempting catch-up...\n", .{});
+                const more = follower.tickCatchUp() catch |err| {
+                    std.debug.print("[FOLLOWER] Catch-up error: {}\n", .{err});
+                    return;
+                };
+                if (more) {
+                    std.debug.print("[FOLLOWER] More data to catch up\n", .{});
+                } else {
+                    std.debug.print("[FOLLOWER] Catch-up complete!\n", .{});
+                }
+            }
         }
-
-        return buffer[0..message_len];
     }
 
     fn handleClientMessage(self: *Server, socket_handle: std.posix.socket_t, read_buffer: []u8) !void {
-        const message_bytes = try readCompleteMessage(socket_handle, read_buffer);
+        const message_bytes = try Protocol.readCompleteMessage(socket_handle, read_buffer);
 
         var request_stream = std.io.fixedBufferStream(message_bytes);
         const request_reader = request_stream.reader();
@@ -187,15 +263,45 @@ pub const Server = struct {
     fn processRequest(self: *Server, request: Protocol.Message, socket_handle: std.posix.socket_t) !void {
         switch (request) {
             .append_request => |req| {
+                // Followers reject client append requests
+                if (self.role == .follower) {
+                    const leader_addr = if (self.cluster_config) |cfg| blk: {
+                        const leader_node = cfg.getLeader();
+                        break :blk if (leader_node) |l| l.address else "unknown";
+                    } else "unknown";
+
+                    std.debug.print("Follower rejecting append request, redirecting to leader at {s}\n", .{leader_addr});
+                    try self.sendErrorResponseDirect(socket_handle, .not_leader, "This node is a follower, redirect to leader");
+                    return;
+                }
+
                 std.debug.print("Processing append request (key={?s}, value_len={})\n", .{
                     req.record.key,
                     req.record.value.len,
                 });
 
-                const offset = self.log.append(req.record) catch |err| {
-                    std.debug.print("Error appending to log: {}\n", .{err});
-                    try self.sendErrorResponseDirect(socket_handle, .io_error, "Failed to append record");
-                    return;
+                // Leader mode: replicate to followers
+                const offset = if (self.leader) |leader| blk: {
+                    // Use leader.replicate() for replication + quorum
+                    const result_offset = leader.replicate(req.record) catch |err| {
+                        std.debug.print("[LEADER] Replication failed: {}\n", .{err});
+                        if (err == error.QuorumNotReached) {
+                            try self.sendErrorResponseDirect(socket_handle, .io_error, "Quorum not reached - cannot commit write");
+                        } else {
+                            try self.sendErrorResponseDirect(socket_handle, .io_error, "Failed to replicate record");
+                        }
+                        return;
+                    };
+                    std.debug.print("[LEADER] Replicated to quorum, offset={}\n", .{result_offset});
+                    break :blk result_offset;
+                } else blk: {
+                    // Standalone mode (no cluster): just append locally
+                    const result_offset = self.log.append(req.record) catch |err| {
+                        std.debug.print("Error appending to log: {}\n", .{err});
+                        try self.sendErrorResponseDirect(socket_handle, .io_error, "Failed to append record");
+                        return;
+                    };
+                    break :blk result_offset;
                 };
 
                 // WORKAROUND: Serialize to buffer then write with posix.write
@@ -210,6 +316,18 @@ pub const Server = struct {
             },
 
             .read_request => |req| {
+                // Followers reject client read requests (could be relaxed to allow stale reads)
+                if (self.role == .follower) {
+                    const leader_addr = if (self.cluster_config) |cfg| blk: {
+                        const leader = cfg.getLeader();
+                        break :blk if (leader) |l| l.address else "unknown";
+                    } else "unknown";
+
+                    std.debug.print("Follower rejecting read request, redirecting to leader at {s}\n", .{leader_addr});
+                    try self.sendErrorResponseDirect(socket_handle, .not_leader, "This node is a follower, redirect to leader");
+                    return;
+                }
+
                 std.debug.print("Processing read request (offset={})\n", .{req.offset});
 
                 const record = self.log.read(req.offset, self.allocator) catch |err| {
@@ -239,6 +357,140 @@ pub const Server = struct {
                 std.debug.print("Read successful (key={?s}, value_len={})\n", .{
                     record.key,
                     record.value.len,
+                });
+            },
+
+            .replicate_request => |req| {
+                // Only followers should receive replication requests from leader
+                if (self.role != .follower or self.follower == null) {
+                    std.debug.print("Received replicate_request but not a follower\n", .{});
+                    try self.sendErrorResponseDirect(socket_handle, .invalid_message, "Not a follower node");
+                    return;
+                }
+
+                std.debug.print("[FOLLOWER] Received replication request (offset={}, leader_commit={})\n", .{
+                    req.offset,
+                    req.leader_commit,
+                });
+
+                const resp = try self.follower.?.handleReplicateRequest(req);
+
+                // Send response back to leader
+                var msg_buffer: [65536]u8 = undefined;
+                var msg_stream = std.io.fixedBufferStream(&msg_buffer);
+                try Protocol.serializeMessage(msg_stream.writer(), Protocol.Message{
+                    .replicate_response = resp,
+                }, self.allocator);
+                _ = try std.posix.write(socket_handle, msg_stream.getWritten());
+
+                if (resp.success) {
+                    std.debug.print("[FOLLOWER] Replicated successfully, follower_offset={}\n", .{resp.follower_offset});
+                } else {
+                    std.debug.print("[FOLLOWER] Replication failed, error_code={}\n", .{resp.error_code});
+                }
+            },
+
+            .heartbeat_request => |req| {
+                // Only followers should receive heartbeats from leader
+                if (self.role != .follower or self.follower == null) {
+                    std.debug.print("Received heartbeat_request but not a follower\n", .{});
+                    try self.sendErrorResponseDirect(socket_handle, .invalid_message, "Not a follower node");
+                    return;
+                }
+
+                std.debug.print("[FOLLOWER] Received heartbeat (leader_commit={}, leader_offset={})\n", .{
+                    req.leader_commit,
+                    req.leader_offset,
+                });
+
+                const resp = self.follower.?.handleHeartbeat(req);
+
+                // Send response back to leader
+                var msg_buffer: [65536]u8 = undefined;
+                var msg_stream = std.io.fixedBufferStream(&msg_buffer);
+                try Protocol.serializeMessage(msg_stream.writer(), Protocol.Message{
+                    .heartbeat_response = resp,
+                }, self.allocator);
+                _ = try std.posix.write(socket_handle, msg_stream.getWritten());
+
+                std.debug.print("[FOLLOWER] Heartbeat acknowledged, follower_offset={}\n", .{resp.follower_offset});
+            },
+
+            .catch_up_request => |req| {
+                // Only leaders should handle catch-up requests from followers
+                if (self.role != .leader) {
+                    std.debug.print("Received catch_up_request but not a leader\n", .{});
+                    try self.sendErrorResponseDirect(socket_handle, .invalid_message, "Not a leader node");
+                    return;
+                }
+
+                std.debug.print("[LEADER] Received catch-up request (start_offset={}, max_entries={})\n", .{
+                    req.start_offset,
+                    req.max_entries,
+                });
+
+                // Handle empty log case
+                var entries: []Protocol.ReplicatedEntry = undefined;
+                var more: bool = false;
+
+                if (self.log.getNextOffset() == 0 or req.start_offset >= self.log.getNextOffset()) {
+                    // Log is empty or follower is caught up - return empty response
+                    entries = try self.allocator.alloc(Protocol.ReplicatedEntry, 0);
+                    more = false;
+                } else {
+                    // Read range of entries from log
+                    const records = try self.log.readRange(req.start_offset, req.max_entries, self.allocator);
+                    errdefer {
+                        for (records) |record| {
+                            if (record.key) |k| self.allocator.free(k);
+                            self.allocator.free(record.value);
+                        }
+                        self.allocator.free(records);
+                    }
+
+                    // Convert to ReplicatedEntry array
+                    entries = try self.allocator.alloc(Protocol.ReplicatedEntry, records.len);
+                    errdefer self.allocator.free(entries);
+
+                    for (records, 0..) |record, i| {
+                        entries[i] = Protocol.ReplicatedEntry{
+                            .offset = req.start_offset + i,
+                            .record = record,
+                        };
+                    }
+
+                    // Check if there are more entries after this batch
+                    const end_offset = req.start_offset + records.len;
+                    more = end_offset < self.log.getNextOffset();
+
+                    // Clean up records array (but not the record contents - they're used in entries)
+                    self.allocator.free(records);
+                }
+                defer {
+                    // Free entries array and all record contents
+                    for (entries) |entry| {
+                        if (entry.record.key) |k| self.allocator.free(k);
+                        self.allocator.free(entry.record.value);
+                    }
+                    self.allocator.free(entries);
+                }
+
+                const resp = Protocol.CatchUpResponse{
+                    .entries = entries,
+                    .more = more,
+                };
+
+                // Send response back to follower
+                var msg_buffer: [65536]u8 = undefined;
+                var msg_stream = std.io.fixedBufferStream(&msg_buffer);
+                try Protocol.serializeMessage(msg_stream.writer(), Protocol.Message{
+                    .catch_up_response = resp,
+                }, self.allocator);
+                _ = try std.posix.write(socket_handle, msg_stream.getWritten());
+
+                std.debug.print("[LEADER] Sent catch-up response ({} entries, more={})\n", .{
+                    entries.len,
+                    more,
                 });
             },
 
@@ -289,6 +541,7 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
+    // Parse arguments: <port> <log_dir> [config_path] [node_id]
     var port: u16 = 9000; // Default port
     if (args.len > 1) {
         port = std.fmt.parseInt(u16, args[1], 10) catch blk: {
@@ -308,9 +561,37 @@ pub fn main() !void {
     const server_config = ServerConfig{
         .port = port,
     };
-    var server = Server.init(server_config, &log, allocator);
 
-    std.debug.print("Starting Zue server on port {d} with log directory {s}...\n", .{ port, log_dir });
+    // Check if cluster mode (config_path and node_id provided)
+    var server = if (args.len > 4) blk: {
+        const config_path = args[3];
+        const node_id = try std.fmt.parseInt(u32, args[4], 10);
+
+        std.debug.print("Starting in cluster mode: node_id={d}, config={s}\n", .{ node_id, config_path });
+
+        // Load cluster config
+        const cluster_config = try config_module.parseFile(config_path, allocator);
+        // Note: We'll pass ownership to the server, but need to manage cleanup
+        const cluster_config_ptr = try allocator.create(ClusterConfig);
+        cluster_config_ptr.* = cluster_config;
+
+        var srv = try Server.initWithCluster(server_config, &log, cluster_config_ptr, node_id, allocator);
+        srv.cluster_config = cluster_config_ptr; // Ensure server keeps reference
+        break :blk srv;
+    } else blk: {
+        std.debug.print("Starting in standalone mode\n", .{});
+        break :blk Server.init(server_config, &log, allocator);
+    };
+
+    defer {
+        // Clean up cluster config if allocated
+        if (server.cluster_config) |cfg| {
+            cfg.deinit();
+            allocator.destroy(cfg);
+        }
+    }
+
+    std.debug.print("Zue server starting on port {d} with log directory {s}...\n", .{ port, log_dir });
     try server.start();
 }
 

@@ -74,31 +74,6 @@ pub const Client = struct {
         return self.stream != null;
     }
 
-    // Helper to read a complete protocol message, handling partial reads
-    fn readCompleteMessage(self: *Client, buffer: []u8) ![]u8 {
-        // Read 4-byte length prefix
-        var len_bytes: [4]u8 = undefined;
-        var total_read: usize = 0;
-        while (total_read < 4) {
-            const n = try std.posix.read(self.stream.?.handle, len_bytes[total_read..]);
-            if (n == 0) return error.EndOfStream;
-            total_read += n;
-        }
-
-        const message_len = std.mem.readInt(u32, &len_bytes, .little);
-        if (message_len > buffer.len) return error.MessageTooLarge;
-
-        // Read the message body (NOT including length prefix)
-        total_read = 0;
-        while (total_read < message_len) {
-            const n = try std.posix.read(self.stream.?.handle, buffer[total_read..message_len]);
-            if (n == 0) return error.UnexpectedEndOfStream;
-            total_read += n;
-        }
-
-        return buffer[0..message_len];
-    }
-
     pub fn append(self: *Client, record: Record) !u64 {
         if (self.stream == null) {
             return ClientError.NotConnected;
@@ -120,7 +95,7 @@ pub const Client = struct {
         _ = try std.posix.write(self.stream.?.handle, msg_bytes);
 
         var response_buffer: [65536]u8 = undefined;
-        const message_bytes = try self.readCompleteMessage(&response_buffer);
+        const message_bytes = try protocol.readCompleteMessage(self.stream.?.handle, &response_buffer);
 
         var response_stream = std.io.fixedBufferStream(message_bytes);
         const response_reader = response_stream.reader();
@@ -161,7 +136,7 @@ pub const Client = struct {
 
         // WORKAROUND: Read complete message using helper that handles partial reads
         var response_buffer: [65536]u8 = undefined;
-        const message_bytes = try self.readCompleteMessage(&response_buffer);
+        const message_bytes = try protocol.readCompleteMessage(self.stream.?.handle, &response_buffer);
 
         var response_stream = std.io.fixedBufferStream(message_bytes);
         const response_reader = response_stream.reader();

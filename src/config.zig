@@ -117,6 +117,18 @@ pub const ClusterConfig = struct {
 };
 
 /// Parse and validate config - returns only valid configs
+/// Parse cluster configuration from a file
+pub fn parseFile(path: []const u8, allocator: std.mem.Allocator) !ClusterConfig {
+    const file = try std.fs.cwd().openFile(path, .{});
+    defer file.close();
+
+    const max_size = 1024 * 1024; // 1MB max config file
+    const contents = try file.readToEndAlloc(allocator, max_size);
+    defer allocator.free(contents);
+
+    return try parseConfig(allocator, contents);
+}
+
 /// Format: whitespace-tolerant line-based
 /// node <id> <address> <port> <role>
 /// quorum <size>

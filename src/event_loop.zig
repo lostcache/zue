@@ -54,13 +54,12 @@ pub const EventLoop = struct {
 
     pub fn unregisterSocket(self: *EventLoop, fd: std.posix.fd_t) void {
         var i: usize = 0;
-        while (i < self.poll_fds.items.len) {
+        while (i < self.poll_fds.items.len) : (i += 1) {
             if (self.poll_fds.items[i].fd == fd) {
                 _ = self.poll_fds.orderedRemove(i);
                 _ = self.socket_info.orderedRemove(i);
                 return;
             }
-            i += 1;
         }
     }
 
