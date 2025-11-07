@@ -221,16 +221,6 @@ pub const Server = struct {
             // Background repair: Process followers that need repair
             _ = leader.tickRepair();
         }
-
-        // If we're a follower in catching-up state, try to fetch more data
-        if (self.follower) |follower| {
-            if (follower.needsCatchUp()) {
-                _ = follower.tickCatchUp() catch |err| {
-                    std.debug.print("[FOLLOWER] Catch-up error: {}\n", .{err});
-                    return;
-                };
-            }
-        }
     }
 
     fn handleClientMessage(self: *Server, socket_handle: std.posix.socket_t, read_buffer: []u8) !void {
@@ -403,84 +393,6 @@ pub const Server = struct {
                 _ = try std.posix.write(socket_handle, msg_stream.getWritten());
 
                 // std.debug.print("[FOLLOWER] Heartbeat acknowledged, follower_offset={?}\n", .{resp.follower_offset});
-            },
-
-            .catch_up_request => |req| {
-                // Only leaders should handle catch-up requests from followers
-                if (self.role != .leader) {
-                    std.debug.print("Received catch_up_request but not a leader\n", .{});
-                    try self.sendErrorResponseDirect(socket_handle, .invalid_message, "Not a leader node");
-                    return;
-                }
-
-                // std.debug.print("[LEADER] Received catch-up request (start_offset={}, max_entries={})\n", .{
-                //     req.start_offset,
-                //     req.max_entries,
-                // });
-
-                // Handle empty log case
-                var entries: []Protocol.ReplicatedEntry = undefined;
-                var more: bool = false;
-
-                if (self.log.getNextOffset() == 0 or req.start_offset >= self.log.getNextOffset()) {
-                    // Log is empty or follower is caught up - return empty response
-                    entries = try self.allocator.alloc(Protocol.ReplicatedEntry, 0);
-                    more = false;
-                } else {
-                    // Read range of entries from log
-                    const records = try self.log.readRange(req.start_offset, req.max_entries, self.allocator);
-                    errdefer {
-                        for (records) |record| {
-                            if (record.key) |k| self.allocator.free(k);
-                            self.allocator.free(record.value);
-                        }
-                        self.allocator.free(records);
-                    }
-
-                    // Convert to ReplicatedEntry array
-                    entries = try self.allocator.alloc(Protocol.ReplicatedEntry, records.len);
-                    errdefer self.allocator.free(entries);
-
-                    for (records, 0..) |record, i| {
-                        entries[i] = Protocol.ReplicatedEntry{
-                            .offset = req.start_offset + i,
-                            .record = record,
-                        };
-                    }
-
-                    // Check if there are more entries after this batch
-                    const end_offset = req.start_offset + records.len;
-                    more = end_offset < self.log.getNextOffset();
-
-                    // Clean up records array (but not the record contents - they're used in entries)
-                    self.allocator.free(records);
-                }
-                defer {
-                    // Free entries array and all record contents
-                    for (entries) |entry| {
-                        if (entry.record.key) |k| self.allocator.free(k);
-                        self.allocator.free(entry.record.value);
-                    }
-                    self.allocator.free(entries);
-                }
-
-                const resp = Protocol.CatchUpResponse{
-                    .entries = entries,
-                    .more = more,
-                };
-
-                // Send response back to follower
-                var msg_buffer: [65536]u8 = undefined;
-                var msg_stream = std.io.fixedBufferStream(&msg_buffer);
-                try Protocol.serializeMessage(msg_stream.writer(), Protocol.Message{
-                    .catch_up_response = resp,
-                }, self.allocator);
-                _ = try std.posix.write(socket_handle, msg_stream.getWritten());
-
-                // std.debug.print("[LEADER] Sent catch-up response ({} entries, more={})\n", .{
-                //     entries.len,
-                //     more,
-                // });
             },
 
             else => {

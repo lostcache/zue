@@ -441,8 +441,26 @@ test "replication: follower catch-up after restart" {
     try cluster.restartFollower(0);
     std.debug.print("Restarted follower 0\n", .{});
 
-    // Wait for follower to catch up (timer-based catch-up is triggered every 2s)
-    std.Thread.sleep(5 * std.time.ns_per_s);
+    // Wait for follower to fully start and connect
+    std.Thread.sleep(2 * std.time.ns_per_s);
+
+    // Trigger a new write to cause offset_mismatch and auto-repair
+    // The follower is at offset 0, leader tries to write at offset 3, causing mismatch
+    const trigger_record = Record{ .key = "trigger", .value = "repair" };
+    _ = try leader_client.append(trigger_record);
+    std.debug.print("Triggered write to initiate repair (leader at offset 3, follower at 0)\n", .{});
+
+    // Wait for leader's tickRepair() to fix the follower
+    // Repair happens in background, may take multiple ticks (each tick is 2s)
+    std.Thread.sleep(8 * std.time.ns_per_s);
+
+    // Write one more record to ensure follower is fully in sync
+    const final_record = Record{ .key = "final", .value = "check" };
+    const final_offset = try leader_client.append(final_record);
+    std.debug.print("Wrote final record at offset {}\n", .{final_offset});
+
+    // Give time for final replication
+    std.Thread.sleep(2 * std.time.ns_per_s);
 
     // Verify follower has all records
     {
