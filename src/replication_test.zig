@@ -5,7 +5,6 @@
 /// - Quorum-based writes
 /// - Follower catch-up
 /// - System behavior under node failures
-
 const std = @import("std");
 const testing = std.testing;
 const net = std.net;
