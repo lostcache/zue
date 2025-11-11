@@ -301,134 +301,215 @@ pub const Leader = struct {
         return ready > 0 and (poll_fds[0].revents & std.posix.POLL.IN) != 0;
     }
 
-    /// Replicate record to followers (PARALLEL using non-blocking I/O)
-    /// Uses Raft-like replication: entries are never rolled back, only commit_index advances
-    /// Returns the committed offset on success
-    pub fn replicate(self: *Leader, record: Record) !u64 {
-        // 1. Append to local log
-        const offset = try self.log.append(record);
+    /// Strategy for handling a follower during replication
+    const ReplicationStrategy = enum {
+        send_inline,        // Send catch-up entries inline during this write
+        defer_to_background, // Too far behind, defer to background repair
+        skip,               // Connection failed or other error, skip this follower
+    };
 
-        // 2. Send to followers IN PARALLEL using non-blocking I/O
-        // Track which followers we're waiting for
-        var pending_followers: std.ArrayList(*FollowerConnection) = .{};
-        defer pending_followers.deinit(self.allocator);
-
-        // Phase 1: Send all requests in parallel (non-blocking)
-        // For each follower, decide whether to:
-        // - Send only newest entry (if caught up)
-        // - Stream small catch-up batch inline (if slightly behind, within threshold)
-        // - Defer to background repair (if far behind, exceeds threshold)
-        for (self.followers) |*follower| {
-            // Hybrid approach: If follower is out-of-sync, try to reconnect and assess lag
-            // before deciding whether to repair inline or defer to background
-            if (!follower.in_sync) {
-                // Try to reconnect (follower might have restarted)
-                if (follower.stream == null) {
-                    follower.connect() catch {
-                        follower.state = .needs_repair;
-                        continue;
-                    };
-                }
-
-                // Successfully connected (or already connected), calculate lag
-                const lag = if (follower.next_index <= offset)
-                    offset - follower.next_index + 1
-                else
-                    0;
-
-                // If lag is within inline threshold, try to catch up during this write
-                // This optimizes for the common case where followers are only slightly behind
-                if (lag > self.inline_catchup_threshold) {
-                    // Too far behind, defer to background repair
+    /// Determine replication strategy for a follower
+    /// Handles reconnection attempts and lag calculation
+    fn determineFollowerStrategy(
+        self: *Leader,
+        follower: *FollowerConnection,
+        current_offset: u64,
+    ) ReplicationStrategy {
+        // Try to reconnect if follower is out-of-sync and disconnected
+        if (!follower.in_sync) {
+            if (follower.stream == null) {
+                follower.connect() catch {
                     follower.state = .needs_repair;
-                    continue;
-                }
-                // Fall through to normal inline catch-up logic below
+                    return .skip;
+                };
             }
 
-            // At this point, follower is either:
-            // - in_sync (normal case)
-            // - out_of_sync but within inline catch-up threshold (optimistic recovery)
-
-            // Calculate how many entries follower is behind
-            const lag = if (follower.next_index <= offset)
-                offset - follower.next_index + 1
+            // Successfully connected, calculate lag
+            const lag = if (follower.next_index <= current_offset)
+                current_offset - follower.next_index + 1
             else
                 0;
 
-            // Decide on strategy based on lag
-            if (lag <= self.inline_catchup_threshold and lag > 0) {
-                // Unified path: send catch-up batch inline (includes hot path where lag == 1)
-                // Use labeled block with errdefer to handle cleanup on any failure
-                follower_scope: {
-                    const count: u32 = @intCast(lag);
-                    const records = self.log.readRange(follower.next_index, count, self.allocator) catch {
-                        follower.in_sync = false;
-                        break :follower_scope;
-                    };
-
-                    // Track allocations for proper cleanup
-                    var entries_to_send: []protocol.ReplicatedEntry = undefined;
-                    var entries_allocated = false;
-
-                    // CRITICAL: errdefer ensures cleanup on ANY error (including append failure)
-                    errdefer {
-                        // Always clean up records
-                        for (records) |rec| {
-                            if (rec.key) |k| self.allocator.free(k);
-                            self.allocator.free(rec.value);
-                        }
-                        self.allocator.free(records);
-
-                        // Clean up entries if allocated
-                        if (entries_allocated) {
-                            self.allocator.free(entries_to_send);
-                        }
-                    }
-
-                    entries_to_send = self.allocator.alloc(protocol.ReplicatedEntry, records.len) catch {
-                        follower.in_sync = false;
-                        break :follower_scope;
-                    };
-                    entries_allocated = true;
-
-                    for (records, 0..) |rec, i| {
-                        entries_to_send[i] = protocol.ReplicatedEntry{
-                            .offset = follower.next_index + i,
-                            .record = rec,
-                        };
-                    }
-
-                    const req = ReplicateRequest{
-                        .entries = entries_to_send,
-                        .leader_commit = self.commit_index orelse 0,
-                    };
-
-                    self.sendReplicateRequestNonBlocking(follower, req) catch {
-                        follower.in_sync = false;
-                        break :follower_scope;
-                    };
-
-                    // This can fail with OOM - errdefer will handle cleanup
-                    try pending_followers.append(self.allocator, follower);
-
-                    // Success path: clean up allocations manually
-                    self.allocator.free(entries_to_send);
-                    for (records) |rec| {
-                        if (rec.key) |k| self.allocator.free(k);
-                        self.allocator.free(rec.value);
-                    }
-                    self.allocator.free(records);
-                }
-            } else if (lag > self.inline_catchup_threshold) {
-                // Follower is far behind - defer to background repair to avoid blocking
+            // If lag exceeds threshold, defer to background
+            if (lag > self.inline_catchup_threshold) {
                 follower.state = .needs_repair;
-                continue;
+                return .defer_to_background;
+            }
+            // Fall through to send inline
+        }
+
+        // Calculate lag for in-sync followers
+        const lag = if (follower.next_index <= current_offset)
+            current_offset - follower.next_index + 1
+        else
+            0;
+
+        // Decide strategy based on lag
+        if (lag > 0 and lag <= self.inline_catchup_threshold) {
+            return .send_inline;
+        } else if (lag > self.inline_catchup_threshold) {
+            follower.state = .needs_repair;
+            return .defer_to_background;
+        }
+
+        // Follower is caught up (lag == 0)
+        return .skip;
+    }
+
+    /// Prepared replication request with allocations that need cleanup
+    const PreparedRequest = struct {
+        request: ReplicateRequest,
+        records: []Record,
+        entries: []protocol.ReplicatedEntry,
+
+        /// Free all allocations
+        fn deinit(self: PreparedRequest, allocator: Allocator) void {
+            for (self.records) |rec| {
+                if (rec.key) |k| allocator.free(k);
+                allocator.free(rec.value);
+            }
+            allocator.free(self.records);
+            allocator.free(self.entries);
+        }
+    };
+
+    /// Prepare inline catch-up request for a follower
+    /// Reads entries from log and builds ReplicateRequest
+    /// Caller must call deinit() on returned PreparedRequest to free memory
+    fn prepareInlineCatchupRequest(
+        self: *Leader,
+        follower: *FollowerConnection,
+        current_offset: u64,
+    ) !PreparedRequest {
+        // Calculate how many entries to send
+        const lag = if (follower.next_index <= current_offset)
+            current_offset - follower.next_index + 1
+        else
+            0;
+
+        const count: u32 = @intCast(lag);
+
+        // Read records from log
+        const records = try self.log.readRange(follower.next_index, count, self.allocator);
+        errdefer {
+            for (records) |rec| {
+                if (rec.key) |k| self.allocator.free(k);
+                self.allocator.free(rec.value);
+            }
+            self.allocator.free(records);
+        }
+
+        // Build entries array
+        const entries = try self.allocator.alloc(protocol.ReplicatedEntry, records.len);
+        errdefer self.allocator.free(entries);
+
+        for (records, 0..) |rec, i| {
+            entries[i] = protocol.ReplicatedEntry{
+                .offset = follower.next_index + i,
+                .record = rec,
+            };
+        }
+
+        const request = ReplicateRequest{
+            .entries = entries,
+            .leader_commit = self.commit_index orelse 0,
+        };
+
+        return PreparedRequest{
+            .request = request,
+            .records = records,
+            .entries = entries,
+        };
+    }
+
+    /// Process a follower's replication response
+    /// Updates follower state based on response (match_index, next_index, in_sync, etc.)
+    fn processFollowerResponse(
+        self: *Leader,
+        follower: *FollowerConnection,
+        current_offset: u64,
+    ) !void {
+        // Read response
+        const resp = try self.receiveReplicateResponse(follower);
+
+        if (resp.success) {
+            // Update Raft state: follower has replicated up to this offset
+            follower.match_index = resp.follower_offset;
+            follower.next_index = if (resp.follower_offset) |off| off + 1 else 0;
+            follower.last_offset = resp.follower_offset orelse 0;
+            follower.state = .replicating; // Ensure in normal state
+
+            // Mark as in_sync if lag is acceptable
+            const current_lag = if (follower.next_index <= current_offset)
+                current_offset - follower.next_index + 1
+            else
+                0;
+            follower.in_sync = (current_lag <= self.max_lag_entries);
+        } else if (resp.error_code == .offset_mismatch) {
+            // Offset mismatch - mark follower as needing repair
+            follower.state = .needs_repair;
+            follower.in_sync = false;
+        } else {
+            // Other error
+            follower.in_sync = false;
+        }
+    }
+
+    /// Send replication requests to all followers in parallel
+    /// Returns list of followers awaiting responses
+    fn sendReplicationRequests(
+        self: *Leader,
+        current_offset: u64,
+    ) !std.ArrayList(*FollowerConnection) {
+        var pending_followers: std.ArrayList(*FollowerConnection) = .{};
+        errdefer pending_followers.deinit(self.allocator);
+
+        for (self.followers) |*follower| {
+            // Determine strategy for this follower
+            const strategy = self.determineFollowerStrategy(follower, current_offset);
+
+            switch (strategy) {
+                .send_inline => {
+                    // Prepare and send catch-up request
+                    const prepared = self.prepareInlineCatchupRequest(follower, current_offset) catch {
+                        follower.in_sync = false;
+                        continue;
+                    };
+                    defer prepared.deinit(self.allocator);
+
+                    // Send request (non-blocking)
+                    self.sendReplicateRequestNonBlocking(follower, prepared.request) catch {
+                        follower.in_sync = false;
+                        continue;
+                    };
+
+                    // Add to pending list
+                    try pending_followers.append(self.allocator, follower);
+                },
+                .defer_to_background => {
+                    // Already marked as needs_repair in determineFollowerStrategy
+                    continue;
+                },
+                .skip => {
+                    // Follower is caught up or connection failed
+                    continue;
+                },
             }
         }
 
-        // Phase 2: Collect responses using poll()
+        return pending_followers;
+    }
+
+    /// Collect replication responses from pending followers using poll()
+    /// Processes responses as they arrive, updating follower state
+    /// Returns when all responses received or timeout occurs
+    fn collectReplicationResponses(
+        self: *Leader,
+        pending_followers: *std.ArrayList(*FollowerConnection),
+        current_offset: u64,
+    ) !void {
         const start_time = std.time.milliTimestamp();
+
         while (pending_followers.items.len > 0) {
             // Check timeout
             const elapsed = std.time.milliTimestamp() - start_time;
@@ -456,53 +537,44 @@ pub const Leader = struct {
 
             if (ready == 0) continue; // Timeout, try again
 
-            // Collect responses from ready followers
+            // Process ready followers
             var i: usize = 0;
             while (i < pending_followers.items.len) {
                 if (poll_fds[i].revents & std.posix.POLL.IN != 0) {
                     const follower = pending_followers.items[i];
 
-                    // Read response
-                    const resp = self.receiveReplicateResponse(follower) catch {
+                    // Process response
+                    self.processFollowerResponse(follower, current_offset) catch {
                         follower.in_sync = false;
-                        _ = pending_followers.swapRemove(i);
-                        continue;
                     };
 
-                    if (resp.success) {
-                        // Update Raft state: follower has replicated up to this offset
-                        follower.match_index = resp.follower_offset;
-                        follower.next_index = if (resp.follower_offset) |off| off + 1 else 0;
-                        follower.last_offset = resp.follower_offset orelse 0;
-                        follower.state = .replicating; // Ensure in normal state
-
-                        // Mark as in_sync if lag is acceptable
-                        // Recalculate lag based on current leader offset
-                        const current_lag = if (follower.next_index <= offset)
-                            offset - follower.next_index + 1
-                        else
-                            0;
-                        follower.in_sync = (current_lag <= self.max_lag_entries);
-                    } else if (resp.error_code == .offset_mismatch) {
-                        // Offset mismatch detected - mark follower as needing repair
-                        // Background repair process will handle this
-                        follower.state = .needs_repair;
-                        follower.in_sync = false;
-                    } else {
-                        follower.in_sync = false;
-                    }
-
+                    // Remove from pending list
                     _ = pending_followers.swapRemove(i);
                 } else {
                     i += 1;
                 }
             }
         }
+    }
 
-        // 3. Calculate commit_index based on quorum of match_index values
+    /// Replicate record to followers (PARALLEL using non-blocking I/O)
+    /// Uses Raft-like replication: entries are never rolled back, only commit_index advances
+    /// Returns the committed offset on success
+    pub fn replicate(self: *Leader, record: Record) !u64 {
+        // 1. Append to local log
+        const offset = try self.log.append(record);
+
+        // 2. Send replication requests to followers in parallel
+        var pending_followers = try self.sendReplicationRequests(offset);
+        defer pending_followers.deinit(self.allocator);
+
+        // 3. Collect responses from followers
+        try self.collectReplicationResponses(&pending_followers, offset);
+
+        // 4. Calculate commit_index based on quorum of match_index values
         const new_commit_index = self.calculateCommitIndex();
 
-        // 4. Check if our entry is committed
+        // 5. Check if our entry is committed
         // calculateCommitIndex() only counts in-sync replicas, so if it returns
         // an index >= our offset, we have quorum
         if (new_commit_index) |commit_idx| {
