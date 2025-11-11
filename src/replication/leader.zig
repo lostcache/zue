@@ -1018,7 +1018,7 @@ test "Leader: init and deinit" {
 
     const log_config = LogConfig.default();
     var log = try Log.create(log_config, log_dir, allocator);
-    defer log.delete() catch {};
+    defer log.closeAndDelete() catch {};
 
     // Create cluster config
     var nodes = try allocator.alloc(NodeConfig, 3);
@@ -1060,7 +1060,7 @@ test "Leader: countInSync" {
 
     const log_config = LogConfig.default();
     var log = try Log.create(log_config, log_dir, allocator);
-    defer log.delete() catch {};
+    defer log.closeAndDelete() catch {};
 
     var nodes = try allocator.alloc(NodeConfig, 3);
     // Note: ClusterConfig takes ownership of nodes and will free them in deinit
@@ -1108,7 +1108,7 @@ test "Leader: hasQuorum" {
 
     const log_config = LogConfig.default();
     var log = try Log.create(log_config, log_dir, allocator);
-    defer log.delete() catch {};
+    defer log.closeAndDelete() catch {};
 
     var nodes = try allocator.alloc(NodeConfig, 3);
     // Note: ClusterConfig takes ownership of nodes and will free them in deinit
@@ -1170,7 +1170,7 @@ test "Leader: replicate with quorum failure leaves entry in log (Raft behavior)"
 
     const log_config = LogConfig.default();
     var log = try Log.create(log_config, log_dir, allocator);
-    defer log.delete() catch {};
+    defer log.closeAndDelete() catch {};
 
     // Create cluster config with quorum=2 (need leader + 1 follower)
     var nodes = try allocator.alloc(NodeConfig, 3);
@@ -1237,7 +1237,7 @@ test "Leader: replicate with quorum success does not rollback" {
 
     const log_config = LogConfig.default();
     var log = try Log.create(log_config, log_dir, allocator);
-    defer log.delete() catch {};
+    defer log.closeAndDelete() catch {};
 
     var nodes = try allocator.alloc(NodeConfig, 2);
     // Note: ClusterConfig takes ownership
@@ -1297,7 +1297,7 @@ test "Leader: repairFollowerLog decrements next_index until match found" {
 
     const log_config = LogConfig.default();
     var log = try Log.create(log_config, log_dir, allocator);
-    defer log.delete() catch {};
+    defer log.closeAndDelete() catch {};
 
     // Add some entries to leader log
     _ = try log.append(Record{ .key = null, .value = "entry0" });
