@@ -180,24 +180,26 @@ pub const MmapFile = struct {
                     0,
                 );
             } else {
-                // Use mremap to extend existing mapping
+                // Use mremap syscall directly (avoids libc dependency)
                 // MREMAP.MAYMOVE allows the kernel to move the mapping if it can't extend in-place
-                const MREMAP = struct {
-                    pub const MAYMOVE: u32 = 1;
-                };
+                const linux = std.os.linux;
 
-                const new_addr = std.c.mremap(
+                const new_addr = linux.mremap(
                     self.mapped_memory.ptr,
                     old_size,
                     new_size,
-                    MREMAP.MAYMOVE,
+                    .{ .MAYMOVE = true },
+                    null,
                 );
 
-                if (@intFromPtr(new_addr) == @as(usize, @bitCast(@as(isize, -1)))) {
-                    return error.MremapFailed;
+                // Check for error: Linux syscalls return error codes as negative values in range [-4095, -1]
+                const err_int = @as(isize, @bitCast(new_addr));
+                if (err_int < 0 and err_int > -4096) {
+                    const err = @as(linux.E, @enumFromInt(-err_int));
+                    return posix.unexpectedErrno(err);
                 }
 
-                self.mapped_memory = @as([*]align(std.heap.page_size_min) u8, @ptrCast(@alignCast(new_addr)))[0..new_size];
+                self.mapped_memory = @as([*]align(std.heap.page_size_min) u8, @ptrFromInt(new_addr))[0..new_size];
             }
         } else {
             // macOS and other platforms: Fall back to unmap/remap
