@@ -14,40 +14,52 @@ pub const MmapLogReader = struct {
     actual_size: u64,
 
     /// Open a log file with memory mapping for reading
-    pub fn open(file_path: []const u8, config: OnDiskLogConfig) !MmapLogReader {
+    /// Scans the log file to find the actual end of valid data by validating checksums
+    pub fn open(file_path: []const u8, config: OnDiskLogConfig, allocator: std.mem.Allocator) !MmapLogReader {
         const mmap_file = try mmap.MmapFile.openRead(file_path);
+        errdefer mmap_file.close();
 
-        // Try to read the .size file to get actual data size
-        const allocator = std.heap.page_allocator;
-        const size_path = std.fmt.allocPrint(allocator, "{s}.size", .{file_path}) catch {
-            // If we can't allocate, just use file size
-            return MmapLogReader{
-                .mmap_file = mmap_file,
-                .config = config,
-                .actual_size = mmap_file.len(),
-            };
-        };
-        defer allocator.free(size_path);
-
-        const actual_size = blk: {
-            const size_file = std.fs.openFileAbsolute(size_path, .{}) catch {
-                // No size file, use full file size
-                break :blk mmap_file.len();
-            };
-            defer size_file.close();
-
-            var buf: [32]u8 = undefined;
-            const bytes_read = size_file.readAll(&buf) catch break :blk mmap_file.len();
-
-            const size_str = std.mem.trim(u8, buf[0..bytes_read], &std.ascii.whitespace);
-            break :blk std.fmt.parseInt(u64, size_str, 10) catch mmap_file.len();
-        };
+        // Scan the log file to find the actual end of valid data
+        const actual_size = scanForValidEnd(mmap_file, config, allocator);
 
         return MmapLogReader{
             .mmap_file = mmap_file,
             .config = config,
             .actual_size = actual_size,
         };
+    }
+
+    /// Scan through the log file to find where valid data ends
+    /// Returns the position after the last valid record
+    fn scanForValidEnd(mmap_file: mmap.MmapFile, config: OnDiskLogConfig, allocator: std.mem.Allocator) u64 {
+        const slice = mmap_file.asConstSlice();
+        var pos: u64 = 0;
+
+        // Use arena allocator for temporary allocations during scan
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const temp_alloc = arena.allocator();
+
+        while (pos < slice.len) {
+            // Try to read the record at this position
+            var stream = std.io.fixedBufferStream(slice[pos..]);
+            const reader = stream.reader();
+
+            // Try to deserialize and validate the record
+            const rec = record.OnDiskLog.deserialize(config, reader, temp_alloc) catch {
+                // Invalid record or incomplete data - this is where valid data ends
+                break;
+            };
+
+            // Calculate record size to advance position
+            const rec_size = record.OnDiskLog.serializedSize(config, rec);
+            pos += rec_size;
+
+            // Reset arena for next iteration to avoid unbounded memory growth
+            _ = arena.reset(.retain_capacity);
+        }
+
+        return pos;
     }
 
     /// Close and unmap the log file
@@ -145,17 +157,14 @@ pub const MmapLogWriter = struct {
     allocator: std.mem.Allocator,
 
     /// Create a new memory-mapped log file for writing
-    pub fn create(file_path: []const u8, config: OnDiskLogConfig) !MmapLogWriter {
+    pub fn create(file_path: []const u8, config: OnDiskLogConfig, allocator: std.mem.Allocator) !MmapLogWriter {
         // Duplicate the path so we can use it later for truncation
-        const allocator = std.heap.page_allocator;
         const path_copy = try allocator.dupe(u8, file_path);
+        errdefer allocator.free(path_copy);
 
         // Pre-allocate space for initial records (1MB)
         const initial_size = 1024 * 1024;
-        const mmap_file = mmap.MmapFile.create(file_path, initial_size) catch |err| {
-            allocator.free(path_copy);
-            return err;
-        };
+        const mmap_file = try mmap.MmapFile.create(file_path, initial_size);
 
         return MmapLogWriter{
             .mmap_file = mmap_file,
@@ -167,56 +176,75 @@ pub const MmapLogWriter = struct {
     }
 
     /// Open an existing log file for appending
-    pub fn open(file_path: []const u8, config: OnDiskLogConfig, current_size: u64) !MmapLogWriter {
-        const allocator = std.heap.page_allocator;
+    /// Scans the log file to find the actual end of valid data
+    pub fn open(file_path: []const u8, config: OnDiskLogConfig, allocator: std.mem.Allocator) !MmapLogWriter {
         const path_copy = try allocator.dupe(u8, file_path);
+        errdefer allocator.free(path_copy);
 
-        // Open with minimum size equal to current size
-        const min_size = if (current_size > 0) current_size else 1024 * 1024;
-        const mmap_file = mmap.MmapFile.openWrite(file_path, min_size) catch |err| {
-            allocator.free(path_copy);
-            return err;
+        // First, get the file size to know minimum mapping size
+        const file_size = blk: {
+            const file = try std.fs.openFileAbsolute(file_path, .{});
+            defer file.close();
+            const stat = try file.stat();
+            break :blk stat.size;
         };
+
+        // Open with minimum size
+        const min_size = @max(file_size, 1024 * 1024);
+        const mmap_file = try mmap.MmapFile.openWrite(file_path, min_size);
+        errdefer mmap_file.close();
+
+        // Scan to find actual end of valid data
+        const actual_size = scanForValidEndWriter(mmap_file, config, allocator);
 
         return MmapLogWriter{
             .mmap_file = mmap_file,
             .config = config,
-            .current_pos = current_size,
+            .current_pos = actual_size,
             .file_path = path_copy,
             .allocator = allocator,
         };
     }
 
+    /// Scan through the log file to find where valid data ends (for writer)
+    /// Returns the position after the last valid record
+    fn scanForValidEndWriter(mmap_file: mmap.MmapFile, config: OnDiskLogConfig, allocator: std.mem.Allocator) u64 {
+        const slice = mmap_file.asConstSlice();
+        var pos: u64 = 0;
+
+        // Use arena allocator for temporary allocations during scan
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const temp_alloc = arena.allocator();
+
+        while (pos < slice.len) {
+            // Try to read the record at this position
+            var stream = std.io.fixedBufferStream(slice[pos..]);
+            const reader = stream.reader();
+
+            // Try to deserialize and validate the record
+            const rec = record.OnDiskLog.deserialize(config, reader, temp_alloc) catch {
+                // Invalid record or incomplete data - this is where valid data ends
+                break;
+            };
+
+            // Calculate record size to advance position
+            const rec_size = record.OnDiskLog.serializedSize(config, rec);
+            pos += rec_size;
+
+            // Reset arena for next iteration to avoid unbounded memory growth
+            _ = arena.reset(.retain_capacity);
+        }
+
+        return pos;
+    }
+
     /// Close and unmap the log file
-    /// Note: On some platforms (macOS), files cannot be truncated while mapped.
-    /// This means the file may be larger than the actual data written.
-    /// Use .size metadata file or track size separately if needed.
     pub fn close(self: *MmapLogWriter) void {
         defer self.allocator.free(self.file_path);
 
         // Sync all changes to disk
         self.mmap_file.sync() catch {};
-
-        // Write a marker file with the actual size
-        // This allows readers to know where the real data ends
-        const size_path = std.fmt.allocPrint(self.allocator, "{s}.size", .{self.file_path}) catch {
-            self.mmap_file.close();
-            return;
-        };
-        defer self.allocator.free(size_path);
-
-        const size_file = std.fs.createFileAbsolute(size_path, .{ .truncate = true }) catch {
-            self.mmap_file.close();
-            return;
-        };
-        defer size_file.close();
-
-        var buf: [32]u8 = undefined;
-        const size_str = std.fmt.bufPrint(&buf, "{d}\n", .{self.current_pos}) catch {
-            self.mmap_file.close();
-            return;
-        };
-        size_file.writeAll(size_str) catch {};
 
         // Close (unmap and close file)
         self.mmap_file.close();
@@ -278,7 +306,7 @@ test "MmapLogWriter: create and append record" {
     defer std.fs.deleteFileAbsolute(test_path) catch {};
 
     const config = OnDiskLogConfig{};
-    var writer = try MmapLogWriter.create(test_path, config);
+    var writer = try MmapLogWriter.create(test_path, config, std.testing.allocator);
     defer writer.close();
 
     const rec = Record{ .key = "test-key", .value = "test-value" };
@@ -295,7 +323,7 @@ test "MmapLogWriter: multiple appends" {
     defer std.fs.deleteFileAbsolute(test_path) catch {};
 
     const config = OnDiskLogConfig{};
-    var writer = try MmapLogWriter.create(test_path, config);
+    var writer = try MmapLogWriter.create(test_path, config, std.testing.allocator);
     defer writer.close();
 
     const rec1 = Record{ .key = "key1", .value = "value1" };
@@ -322,7 +350,7 @@ test "MmapLogReader: read records" {
     // Write some records
     var positions: [3]usize = undefined;
     {
-        var writer = try MmapLogWriter.create(test_path, config);
+        var writer = try MmapLogWriter.create(test_path, config, std.testing.allocator);
         defer writer.close();
 
         const rec1 = Record{ .key = "key1", .value = "value1" };
@@ -338,7 +366,7 @@ test "MmapLogReader: read records" {
 
     // Read them back
     {
-        var reader = try MmapLogReader.open(test_path, config);
+        var reader = try MmapLogReader.open(test_path, config, std.testing.allocator);
         defer reader.close();
 
         // Read first record
@@ -370,13 +398,12 @@ test "MmapLogReader: read records" {
 test "MmapLogReader: recordSizeAt" {
     const test_path = "/tmp/test_mmap_log_size.log";
     defer std.fs.deleteFileAbsolute(test_path) catch {};
-    defer std.fs.deleteFileAbsolute("/tmp/test_mmap_log_size.log.size") catch {};
 
     const config = OnDiskLogConfig{};
 
     var pos: usize = 0;
     {
-        var writer = try MmapLogWriter.create(test_path, config);
+        var writer = try MmapLogWriter.create(test_path, config, std.testing.allocator);
         defer writer.close();
 
         const rec = Record{ .key = "key", .value = "value" };
@@ -385,7 +412,7 @@ test "MmapLogReader: recordSizeAt" {
     }
 
     {
-        var reader = try MmapLogReader.open(test_path, config);
+        var reader = try MmapLogReader.open(test_path, config, std.testing.allocator);
         defer reader.close();
 
         const size = try reader.recordSizeAt(pos);
@@ -401,7 +428,7 @@ test "MmapLogWriter: auto-extend on large write" {
     const config = OnDiskLogConfig{
         .value_max_size_bytes = 2 * 1024 * 1024, // Allow 2MB values
     };
-    var writer = try MmapLogWriter.create(test_path, config);
+    var writer = try MmapLogWriter.create(test_path, config, std.testing.allocator);
     defer writer.close();
 
     // Create a large value that will require extending
@@ -418,13 +445,12 @@ test "MmapLogWriter: auto-extend on large write" {
 test "MmapLogWriter and Reader: persistence" {
     const test_path = "/tmp/test_mmap_log_persist.log";
     defer std.fs.deleteFileAbsolute(test_path) catch {};
-    defer std.fs.deleteFileAbsolute("/tmp/test_mmap_log_persist.log.size") catch {};
 
     const config = OnDiskLogConfig{};
 
     // Write
     {
-        var writer = try MmapLogWriter.create(test_path, config);
+        var writer = try MmapLogWriter.create(test_path, config, std.testing.allocator);
         defer writer.close();
 
         var i: u32 = 0;
@@ -443,7 +469,7 @@ test "MmapLogWriter and Reader: persistence" {
 
     // Read and verify
     {
-        var reader = try MmapLogReader.open(test_path, config);
+        var reader = try MmapLogReader.open(test_path, config, std.testing.allocator);
         defer reader.close();
 
         var pos: u64 = 0;

@@ -2,10 +2,11 @@ const std = @import("std");
 const record = @import("record.zig");
 const log_index = @import("log_index.zig");
 const segment = @import("segment.zig");
+const mmap_segment = @import("mmap_segment.zig");
 const log_config = @import("log_config.zig");
 
 const Record = record.Record;
-const Segment = segment.Segment;
+const Segment = mmap_segment.MmapSegment;
 const SegmentConfig = segment.SegmentConfig;
 
 pub const LogConfig = log_config.LogConfig;
@@ -35,7 +36,7 @@ pub const Log = struct {
             config.initial_offset,
             allocator,
         );
-        errdefer initial_segment.delete() catch {};
+        errdefer initial_segment.closeAndDelete() catch {};
 
         try segments.append(allocator, initial_segment);
 
@@ -108,14 +109,17 @@ pub const Log = struct {
         self.allocator.free(self.dir_path);
     }
 
-    pub fn delete(self: *Log) !void {
+    /// Close the log and delete all segments and the directory from disk
+    /// This is a destructive operation that permanently removes all data
+    pub fn closeAndDelete(self: *Log) !void {
+        defer self.allocator.free(self.dir_path);
+        defer self.segments.deinit(self.allocator);
+
         for (self.segments.items) |*seg| {
-            try seg.delete();
+            try seg.closeAndDelete();
         }
-        self.segments.deinit(self.allocator);
 
         try std.fs.deleteDirAbsolute(self.dir_path);
-        self.allocator.free(self.dir_path);
     }
 
     pub fn append(self: *Log, rec: Record) !u64 {
@@ -226,7 +230,7 @@ pub const Log = struct {
 
             if (next_segment.base_offset <= min_offset) {
                 var seg = self.segments.orderedRemove(0);
-                try seg.delete();
+                try seg.closeAndDelete();
                 segments_removed += 1;
             } else {
                 break;
@@ -322,7 +326,7 @@ test "Log: create new log" {
 
     const config = LogConfig.default();
     var log = try Log.create(config, log_path, std.testing.allocator);
-    defer log.delete() catch {};
+    defer log.closeAndDelete() catch {};
 
     // Verify initial state
     try std.testing.expectEqual(@as(usize, 1), log.segments.items.len);
@@ -342,7 +346,7 @@ test "Log: append single record" {
 
     const config = LogConfig.default();
     var log = try Log.create(config, log_path, std.testing.allocator);
-    defer log.delete() catch {};
+    defer log.closeAndDelete() catch {};
 
     const rec = Record{ .key = "test-key", .value = "test-value" };
     const offset = try log.append(rec);
@@ -363,7 +367,7 @@ test "Log: append and read multiple records" {
 
     const config = LogConfig.default();
     var log = try Log.create(config, log_path, std.testing.allocator);
-    defer log.delete() catch {};
+    defer log.closeAndDelete() catch {};
 
     // Append multiple records
     const rec1 = Record{ .key = "key1", .value = "value1" };
@@ -428,7 +432,7 @@ test "Log: persistence across close and open" {
     // Reopen and verify
     {
         var log = try Log.open(config, log_path, std.testing.allocator);
-        defer log.delete() catch {};
+        defer log.closeAndDelete() catch {};
 
         try std.testing.expectEqual(@as(u64, 2), log.getNextOffset());
         try std.testing.expectEqual(@as(usize, 1), log.getSegmentCount());
@@ -468,7 +472,7 @@ test "Log: segment rotation when full" {
     };
 
     var log = try Log.create(config, log_path, std.testing.allocator);
-    defer log.delete() catch {};
+    defer log.closeAndDelete() catch {};
 
     // Initially should have 1 segment
     try std.testing.expectEqual(@as(usize, 1), log.getSegmentCount());
@@ -526,7 +530,7 @@ test "Log: read from multiple segments" {
     };
 
     var log = try Log.create(config, log_path, std.testing.allocator);
-    defer log.delete() catch {};
+    defer log.closeAndDelete() catch {};
 
     _ = try log.append(rec1); // offset 100 - segment 1
     _ = try log.append(rec2); // offset 101 - segment 1
@@ -571,7 +575,7 @@ test "Log: truncate old segments" {
     };
 
     var log = try Log.create(config, log_path, std.testing.allocator);
-    defer log.delete() catch {};
+    defer log.closeAndDelete() catch {};
 
     // Create 3 segments (2 records each)
     var i: usize = 0;
@@ -612,7 +616,7 @@ test "Log: getOldestOffset returns correct value" {
     };
 
     var log = try Log.create(config, log_path, std.testing.allocator);
-    defer log.delete() catch {};
+    defer log.closeAndDelete() catch {};
 
     try std.testing.expectEqual(@as(u64, 1000), log.getOldestOffset());
 }
@@ -629,7 +633,7 @@ test "Log: getTotalSize returns sum of segment sizes" {
 
     const config = LogConfig.default();
     var log = try Log.create(config, log_path, std.testing.allocator);
-    defer log.delete() catch {};
+    defer log.closeAndDelete() catch {};
 
     try std.testing.expectEqual(@as(u64, 0), log.getTotalSize());
 
@@ -671,7 +675,7 @@ test "Log.readRange: read multiple records" {
 
     const config = LogConfig.default();
     var log = try Log.create(config, log_path, std.testing.allocator);
-    defer log.delete() catch {};
+    defer log.closeAndDelete() catch {};
 
     // Append 10 records
     var i: u64 = 0;
@@ -712,7 +716,7 @@ test "Log.readRange: read all available records when max_count exceeds available
 
     const config = LogConfig.default();
     var log = try Log.create(config, log_path, std.testing.allocator);
-    defer log.delete() catch {};
+    defer log.closeAndDelete() catch {};
 
     // Append 3 records
     _ = try log.append(Record{ .key = "k1", .value = "v1" });
@@ -746,7 +750,7 @@ test "Log.readRange: read zero records" {
 
     const config = LogConfig.default();
     var log = try Log.create(config, log_path, std.testing.allocator);
-    defer log.delete() catch {};
+    defer log.closeAndDelete() catch {};
 
     _ = try log.append(Record{ .key = "k1", .value = "v1" });
 
@@ -768,7 +772,7 @@ test "Log.readRange: offset out of bounds returns error" {
 
     const config = LogConfig.default();
     var log = try Log.create(config, log_path, std.testing.allocator);
-    defer log.delete() catch {};
+    defer log.closeAndDelete() catch {};
 
     _ = try log.append(Record{ .key = "k1", .value = "v1" });
 
@@ -801,7 +805,7 @@ test "Log.readRange: read across multiple segments" {
     };
 
     var log = try Log.create(config, log_path, std.testing.allocator);
-    defer log.delete() catch {};
+    defer log.closeAndDelete() catch {};
 
     // Append 5 records (will span 3 segments: 2, 2, 1)
     var i: u64 = 0;
@@ -848,7 +852,7 @@ test "Log: truncateToOffset removes uncommitted entries" {
 
     const config = LogConfig.default();
     var log = try Log.create(config, log_path, std.testing.allocator);
-    defer log.delete() catch {};
+    defer log.closeAndDelete() catch {};
 
     // Append 3 records
     const offset0 = try log.append(Record{ .key = "k0", .value = "v0" });
@@ -895,7 +899,7 @@ test "Log: truncateToOffset with invalid offset returns error" {
 
     const config = LogConfig.default();
     var log = try Log.create(config, log_path, std.testing.allocator);
-    defer log.delete() catch {};
+    defer log.closeAndDelete() catch {};
 
     _ = try log.append(Record{ .key = "k0", .value = "v0" });
 

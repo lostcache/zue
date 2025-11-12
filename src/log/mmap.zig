@@ -152,28 +152,70 @@ pub const MmapFile = struct {
     }
 
     /// Extend the mapping to a new size
-    /// Note: This requires remapping the file
+    /// Platform-specific implementation:
+    /// - Linux: Uses mremap() which can efficiently extend the mapping in-place
+    ///   or move it if necessary, avoiding full unmap/remap cycle
+    /// - macOS/Other: Falls back to unmap/remap which has higher performance penalty
+    ///   due to lack of mremap support
     pub fn extend(self: *MmapFile, new_size: usize) !void {
         if (new_size <= self.mapped_memory.len) return;
         if (!self.writable) return error.NotWritable;
 
-        // Unmap current region
-        if (self.mapped_memory.len > 0) {
-            posix.munmap(self.mapped_memory);
-        }
-
-        // Extend file
+        // Extend file first
         try self.file.setEndPos(new_size);
 
-        // Remap with new size
-        self.mapped_memory = try posix.mmap(
-            null,
-            new_size,
-            posix.PROT.READ | posix.PROT.WRITE,
-            .{ .TYPE = .SHARED },
-            self.file.handle,
-            0,
-        );
+        if (builtin.os.tag == .linux) {
+            // Linux: Use mremap for efficient extension
+            // mremap can often extend the mapping in-place or move it efficiently
+            const old_size = self.mapped_memory.len;
+
+            if (old_size == 0) {
+                // Empty mapping - need to create new mapping
+                self.mapped_memory = try posix.mmap(
+                    null,
+                    new_size,
+                    posix.PROT.READ | posix.PROT.WRITE,
+                    .{ .TYPE = .SHARED },
+                    self.file.handle,
+                    0,
+                );
+            } else {
+                // Use mremap to extend existing mapping
+                // MREMAP.MAYMOVE allows the kernel to move the mapping if it can't extend in-place
+                const MREMAP = struct {
+                    pub const MAYMOVE: u32 = 1;
+                };
+
+                const new_addr = std.c.mremap(
+                    self.mapped_memory.ptr,
+                    old_size,
+                    new_size,
+                    MREMAP.MAYMOVE,
+                );
+
+                if (@intFromPtr(new_addr) == @as(usize, @bitCast(@as(isize, -1)))) {
+                    return error.MremapFailed;
+                }
+
+                self.mapped_memory = @as([*]align(std.heap.page_size_min) u8, @ptrCast(@alignCast(new_addr)))[0..new_size];
+            }
+        } else {
+            // macOS and other platforms: Fall back to unmap/remap
+            // This is less efficient as it requires unmapping the entire region,
+            // potentially losing TLB entries and requiring page table updates
+            if (self.mapped_memory.len > 0) {
+                posix.munmap(self.mapped_memory);
+            }
+
+            self.mapped_memory = try posix.mmap(
+                null,
+                new_size,
+                posix.PROT.READ | posix.PROT.WRITE,
+                .{ .TYPE = .SHARED },
+                self.file.handle,
+                0,
+            );
+        }
     }
 };
 

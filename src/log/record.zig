@@ -162,8 +162,13 @@ pub const OnDiskLog = struct {
 
         _ = try reader.readAll(&buf);
         const value_len: i32 = std.mem.readInt(i32, &buf, .little);
-        std.debug.assert(value_len >= config.value_min_size_bytes);
-        std.debug.assert(value_len <= config.value_max_size_bytes);
+
+        // Validate value_len instead of asserting - return error if invalid
+        if (value_len < config.value_min_size_bytes or value_len > config.value_max_size_bytes) {
+            // Clean up key if allocated
+            if (key_buf) |kb| allocator.free(kb);
+            return error.InvalidRecordSize;
+        }
 
         const value_buf = try allocator.alloc(u8, @intCast(value_len));
         _ = try reader.readAll(value_buf);

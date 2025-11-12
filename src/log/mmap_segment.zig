@@ -7,7 +7,6 @@ const segment = @import("segment.zig");
 const Record = record.Record;
 const SegmentConfig = segment.SegmentConfig;
 const MmapIndex = mmap_index.MmapIndex;
-const MmapLogReader = mmap_log.MmapLogReader;
 const MmapLogWriter = mmap_log.MmapLogWriter;
 
 /// Memory-mapped segment for high-performance IO
@@ -24,7 +23,6 @@ pub const MmapSegment = struct {
     next_relative_offset: u32,
 
     log_writer: MmapLogWriter,
-    log_reader: MmapLogReader,
     log_file_name: []const u8,
     log_file_size: u64,
 
@@ -51,7 +49,7 @@ pub const MmapSegment = struct {
             }
         }
 
-        var log_writer = try MmapLogWriter.create(log_file_path, config.log_config);
+        var log_writer = try MmapLogWriter.create(log_file_path, config.log_config, gpa_alloc);
         var log_writer_created = true;
         errdefer {
             if (log_writer_created) {
@@ -60,24 +58,14 @@ pub const MmapSegment = struct {
             }
         }
 
-        var log_reader = try MmapLogReader.open(log_file_path, config.log_config);
-        var log_reader_opened = true;
-        errdefer {
-            if (log_reader_opened) {
-                log_reader.close();
-            }
-        }
-
         const index_file_path = try getAllocIndexFilePath(gpa_alloc, abs_base_path, base_offset);
         errdefer gpa_alloc.free(index_file_path);
 
         const index = MmapIndex.create(index_file_path, config.index_config) catch |err| {
             log_writer.close();
-            log_reader.close();
             std.fs.deleteFileAbsolute(log_file_path) catch {};
             gpa_alloc.free(log_file_path);
             log_writer_created = false;
-            log_reader_opened = false;
             log_file_path_allocated = false;
             return err;
         };
@@ -93,7 +81,6 @@ pub const MmapSegment = struct {
             .base_offset = base_offset,
             .next_relative_offset = 0,
             .log_writer = log_writer,
-            .log_reader = log_reader,
             .log_file_name = log_file_path,
             .log_file_size = 0,
             .index = index,
@@ -112,15 +99,8 @@ pub const MmapSegment = struct {
             }
         }
 
-        // Get log file size
-        const log_stat = blk: {
-            const file = try std.fs.openFileAbsolute(log_file_path, .{});
-            defer file.close();
-            break :blk try file.stat();
-        };
-        const log_file_size = log_stat.size;
-
-        var log_writer = try MmapLogWriter.open(log_file_path, config.log_config, log_file_size);
+        // Open the log writer - it will scan to find the actual end of valid data
+        var log_writer = try MmapLogWriter.open(log_file_path, config.log_config, gpa_alloc);
         var log_writer_opened = true;
         errdefer {
             if (log_writer_opened) {
@@ -128,74 +108,64 @@ pub const MmapSegment = struct {
             }
         }
 
-        var log_reader = try MmapLogReader.open(log_file_path, config.log_config);
-        var log_reader_opened = true;
-        errdefer {
-            if (log_reader_opened) {
-                log_reader.close();
-            }
-        }
-
         const index_file_path = try getAllocIndexFilePath(gpa_alloc, abs_base_path, base_offset);
         errdefer gpa_alloc.free(index_file_path);
 
-        const index = MmapIndex.open(index_file_path, config.index_config) catch |err| {
+        var index = MmapIndex.open(index_file_path, config.index_config) catch |err| {
             log_writer.close();
-            log_reader.close();
             gpa_alloc.free(log_file_path);
             log_writer_opened = false;
-            log_reader_opened = false;
             log_file_path_allocated = false;
             return err;
         };
         errdefer {
-            var idx = index;
-            idx.close();
+            index.close();
         }
 
-        // Calculate next_relative_offset and bytes_since_last_index
+        // Get the actual data size from the log writer (it scanned the file)
+        const actual_data_size = log_writer.getCurrentPos();
+
+        // Get log file size for tracking
+        const log_file_size = blk: {
+            const file = try std.fs.openFileAbsolute(log_file_path, .{});
+            defer file.close();
+            const stat = try file.stat();
+            break :blk stat.size;
+        };
+
+        // Rebuild the index from the log (the log is the source of truth)
+        // The index is just a cache for faster lookups
         var next_relative_offset: u32 = 0;
         var bytes_since_last_index: u64 = 0;
 
-        const index_entry_count = index.getEntryCount();
-        if (index_entry_count > 0) {
-            // Get the last index entry
-            const last_index = try index.lookup(std.math.maxInt(u32));
-            const last_indexed_pos = last_index.pos;
+        var arena = std.heap.ArenaAllocator.init(gpa_alloc);
+        defer arena.deinit();
+        const temp_alloc = arena.allocator();
 
-            // Count records from the last indexed position to EOF
-            var arena = std.heap.ArenaAllocator.init(gpa_alloc);
-            defer arena.deinit();
-            const temp_alloc = arena.allocator();
+        var pos: u64 = 0;
+        while (pos < actual_data_size) {
+            // Check if we should create an index entry
+            const should_create_index = bytes_since_last_index >= config.index_config.bytes_per_index or next_relative_offset == 0;
 
-            var pos: u64 = last_indexed_pos;
-            var record_count: u32 = 0;
-            while (pos < log_file_size) {
-                const rec = log_reader.deserializeAt(pos, temp_alloc) catch break;
-                _ = rec;
-                record_count += 1;
-                pos += try log_reader.recordSizeAt(pos);
+            if (should_create_index) {
+                if (!index.isFull()) {
+                    _ = try index.add(next_relative_offset, @intCast(pos));
+                    bytes_since_last_index = 0;
+                }
+                // If index is full, just continue - index is just a cache
             }
 
-            next_relative_offset = last_index.relative_offset + record_count;
-            bytes_since_last_index = log_file_size - last_indexed_pos;
-        } else {
-            // No index entries - count all records from beginning
-            var arena = std.heap.ArenaAllocator.init(gpa_alloc);
-            defer arena.deinit();
-            const temp_alloc = arena.allocator();
+            // Deserialize record to validate and get size
+            const rec = deserializeRecordAt(&log_writer, pos, temp_alloc, config.log_config) catch break;
+            _ = rec;
 
-            var pos: u64 = 0;
-            var record_count: u32 = 0;
-            while (pos < log_file_size) {
-                const rec = log_reader.deserializeAt(pos, temp_alloc) catch break;
-                _ = rec;
-                record_count += 1;
-                pos += try log_reader.recordSizeAt(pos);
-            }
+            const rec_size = try recordSizeAt(&log_writer, pos, actual_data_size, config.log_config);
+            pos += rec_size;
+            bytes_since_last_index += rec_size;
+            next_relative_offset += 1;
 
-            next_relative_offset = record_count;
-            bytes_since_last_index = log_file_size;
+            // Reset arena to avoid unbounded memory growth
+            _ = arena.reset(.retain_capacity);
         }
 
         return MmapSegment{
@@ -204,7 +174,6 @@ pub const MmapSegment = struct {
             .base_offset = base_offset,
             .next_relative_offset = next_relative_offset,
             .log_writer = log_writer,
-            .log_reader = log_reader,
             .log_file_name = log_file_path,
             .log_file_size = log_file_size,
             .index = index,
@@ -214,18 +183,18 @@ pub const MmapSegment = struct {
     }
 
     /// Close the segment
+    /// Unmaps files and frees memory, but keeps the files on disk
     pub fn close(self: *MmapSegment) void {
         self.log_writer.close();
-        self.log_reader.close();
         self.index.close();
         self.gpa_alloc.free(self.log_file_name);
         self.gpa_alloc.free(self.index_file_name);
     }
 
-    /// Delete the segment files
-    pub fn delete(self: *MmapSegment) !void {
+    /// Close the segment and delete the files from disk
+    /// This is a destructive operation that permanently removes data
+    pub fn closeAndDelete(self: *MmapSegment) !void {
         self.log_writer.close();
-        self.log_reader.close();
         self.index.close();
         try std.fs.deleteFileAbsolute(self.log_file_name);
         try std.fs.deleteFileAbsolute(self.index_file_name);
@@ -265,6 +234,16 @@ pub const MmapSegment = struct {
 
     /// Read a record from the segment
     /// Much faster than traditional segment due to direct memory reads
+    ///
+    /// Performance characteristics with sparse index:
+    /// - Index lookup: O(log N) binary search through index entries
+    /// - Forward scan: O(M) where M = records between index entry and target
+    ///   - For each skipped record, reads only size fields (not full data)
+    ///   - With default bytes_per_index=4KB, typically M < 100 records
+    ///   - For denser index (smaller bytes_per_index), M decreases but index grows
+    ///
+    /// Tradeoff: Sparse index saves disk space at cost of forward scan
+    /// For random reads, consider decreasing bytes_per_index to reduce scan distance
     pub fn read(self: *MmapSegment, offset: u64, allocator: std.mem.Allocator) !Record {
         if (offset < self.base_offset) {
             return error.OffsetOutOfBounds;
@@ -282,14 +261,15 @@ pub const MmapSegment = struct {
         var pos: u64 = index_entry.pos;
 
         // Scan forward to find the exact record
+        // Note: This only reads size fields, not full record data - relatively efficient
         while (current_relative_offset < relative_offset) : (current_relative_offset += 1) {
-            // Skip this record by just advancing position
-            const skip_size = try self.log_reader.recordSizeAt(pos);
+            // Skip this record by reading its size and advancing position
+            const skip_size = try recordSizeAt(&self.log_writer, pos, self.log_file_size, self.config.log_config);
             pos += skip_size;
         }
 
         // Now read the target record
-        return try self.log_reader.deserializeAt(pos, allocator);
+        return try deserializeRecordAt(&self.log_writer, pos, allocator, self.config.log_config);
     }
 
     /// Check if the segment is full
@@ -310,6 +290,62 @@ pub const MmapSegment = struct {
 };
 
 // ============================================================================
+// Helper Functions - Read from writer's mapping
+// ============================================================================
+
+/// Deserialize a record at a specific position from the writer's mapping
+fn deserializeRecordAt(writer: *const MmapLogWriter, pos: u64, allocator: std.mem.Allocator, config: record.OnDiskLogConfig) !Record {
+    const slice = writer.mmap_file.asConstSlice();
+
+    const actual_size = writer.getCurrentPos();
+    if (pos >= actual_size or pos >= slice.len) {
+        return error.EndOfStream;
+    }
+
+    var stream = std.io.fixedBufferStream(slice[pos..]);
+    const reader = stream.reader();
+
+    return try record.OnDiskLog.deserialize(config, reader, allocator);
+}
+
+/// Calculate the size of a record at a specific position from the writer's mapping
+fn recordSizeAt(writer: *const MmapLogWriter, pos: u64, _: u64, _: record.OnDiskLogConfig) !usize {
+    const slice = writer.mmap_file.asConstSlice();
+    const actual_size = writer.getCurrentPos();
+
+    if (pos >= actual_size or pos >= slice.len) {
+        return error.EndOfStream;
+    }
+
+    // Need at least CRC + Timestamp + KeyLen fields (16 bytes)
+    const min_header = 4 + 8 + 4; // CRC + Timestamp + KeyLen
+    if (pos + min_header > actual_size or pos + min_header > slice.len) {
+        return error.IncompleteRecord;
+    }
+
+    // Read KeyLen
+    const key_len = std.mem.readInt(i32, slice[pos + 12 ..][0..4], .little);
+    if (key_len < 0) {
+        return error.InvalidRecordSize;
+    }
+
+    // ValueLen is after the key
+    const value_len_offset = 16 + @as(usize, @intCast(key_len));
+    if (pos + value_len_offset + 4 > actual_size or pos + value_len_offset + 4 > slice.len) {
+        return error.IncompleteRecord;
+    }
+
+    const value_len = std.mem.readInt(i32, slice[pos + value_len_offset ..][0..4], .little);
+    if (value_len < 0) {
+        return error.InvalidRecordSize;
+    }
+
+    // Total size
+    const total_size = 16 + @as(usize, @intCast(key_len)) + 4 + @as(usize, @intCast(value_len));
+    return total_size;
+}
+
+// ============================================================================
 // Unit Tests
 // ============================================================================
 
@@ -328,7 +364,7 @@ test "MmapSegment: create new segment" {
     const config = SegmentConfig.default();
 
     var seg = try MmapSegment.create(config, abs_path, test_offset, std.testing.allocator);
-    defer seg.delete() catch {};
+    defer seg.closeAndDelete() catch {};
 
     try std.testing.expectEqual(test_offset, seg.base_offset);
     try std.testing.expectEqual(@as(u64, 0), seg.log_file_size);
@@ -348,7 +384,7 @@ test "MmapSegment: append and read single record" {
 
     const config = SegmentConfig.default();
     var seg = try MmapSegment.create(config, abs_path, test_offset, std.testing.allocator);
-    defer seg.delete() catch {};
+    defer seg.closeAndDelete() catch {};
 
     const rec = Record{ .key = "test-key", .value = "test-value" };
     try seg.append(rec);
@@ -378,7 +414,7 @@ test "MmapSegment: append and read multiple records" {
 
     const config = SegmentConfig.default();
     var seg = try MmapSegment.create(config, abs_path, test_offset, std.testing.allocator);
-    defer seg.delete() catch {};
+    defer seg.closeAndDelete() catch {};
 
     const rec1 = Record{ .key = "key1", .value = "value1" };
     const rec2 = Record{ .key = "key2", .value = "value2" };
@@ -436,7 +472,7 @@ test "MmapSegment: persistence across close/open" {
     // Reopen and verify
     {
         var seg = try MmapSegment.open(config, abs_path, test_offset, std.testing.allocator);
-        defer seg.delete() catch {};
+        defer seg.closeAndDelete() catch {};
 
         try std.testing.expectEqual(@as(u32, 2), seg.next_relative_offset);
 
@@ -463,7 +499,7 @@ test "MmapSegment: many records (performance test)" {
 
     const config = SegmentConfig.default();
     var seg = try MmapSegment.create(config, abs_path, test_offset, std.testing.allocator);
-    defer seg.delete() catch {};
+    defer seg.closeAndDelete() catch {};
 
     // Write 1000 records
     var i: u64 = 0;

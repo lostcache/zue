@@ -122,7 +122,7 @@ test "Follower: init and deinit" {
     defer allocator.free(log_path);
 
     var log = try Log.create(log_config, log_path, allocator);
-    defer log.delete() catch {};
+    defer log.closeAndDelete() catch {};
 
     var follower = try Follower.init(&log, "127.0.0.1", 9000, allocator);
     defer follower.deinit();
@@ -146,7 +146,7 @@ test "Follower: handleReplicateRequest - normal append" {
     defer allocator.free(log_path);
 
     var log = try Log.create(log_config, log_path, allocator);
-    defer log.delete() catch {};
+    defer log.closeAndDelete() catch {};
 
     var follower = try Follower.init(&log, "127.0.0.1", 9000, allocator);
     defer follower.deinit();
@@ -208,7 +208,7 @@ test "Follower: handleReplicateRequest - gap detection" {
     defer allocator.free(log_path);
 
     var log = try Log.create(log_config, log_path, allocator);
-    defer log.delete() catch {};
+    defer log.closeAndDelete() catch {};
 
     var follower = try Follower.init(&log, "127.0.0.1", 9000, allocator);
     defer follower.deinit();
@@ -250,7 +250,7 @@ test "Follower: handleHeartbeat" {
     defer allocator.free(log_path);
 
     var log = try Log.create(log_config, log_path, allocator);
-    defer log.delete() catch {};
+    defer log.closeAndDelete() catch {};
 
     var follower = try Follower.init(&log, "127.0.0.1", 9000, allocator);
     defer follower.deinit();
@@ -290,7 +290,7 @@ test "Follower: isHealthy" {
     defer allocator.free(log_path);
 
     var log = try Log.create(log_config, log_path, allocator);
-    defer log.delete() catch {};
+    defer log.closeAndDelete() catch {};
 
     var follower = try Follower.init(&log, "127.0.0.1", 9000, allocator);
     defer follower.deinit();

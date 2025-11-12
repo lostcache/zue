@@ -27,43 +27,21 @@ pub const MmapIndex = struct {
     }
 
     /// Open an existing memory-mapped index file
+    /// The index is treated as a cache - it will be rebuilt from the log on open
+    /// This ensures the index is always consistent with the source of truth (the log)
     pub fn open(file_path: []const u8, config: OnDiskIndexConfig) !MmapIndex {
         const file = try std.fs.openFileAbsolute(file_path, .{ .mode = .read_write });
         const stat = try file.stat();
         const file_size = stat.size;
-
-        // Find the actual size by scanning for valid entries
-        // Empty/invalid entries will have CRC mismatch
-        var actual_size: u64 = 0;
-        const entry_count = file_size / INDEX_SIZE_BYTES;
-
-        if (entry_count > 0) {
-            var buf: [INDEX_SIZE_BYTES]u8 = undefined;
-            var i: u64 = 0;
-            while (i < entry_count) : (i += 1) {
-                try file.seekTo(i * INDEX_SIZE_BYTES);
-                const bytes_read = try file.readAll(&buf);
-                if (bytes_read < INDEX_SIZE_BYTES) break;
-
-                const index = Index{
-                    .relative_offset = std.mem.readInt(u32, buf[0..4], .little),
-                    .pos = std.mem.readInt(u32, buf[4..8], .little),
-                    .crc32 = std.mem.readInt(u32, buf[8..12], .little),
-                };
-
-                if (!index.validate()) break;
-                actual_size = (i + 1) * INDEX_SIZE_BYTES;
-            }
-        }
-
         file.close();
 
-        const mmap_file = try mmap.MmapFile.openWrite(file_path, file_size);
+        const mmap_file = try mmap.MmapFile.openWrite(file_path, @max(file_size, INDEX_SIZE_BYTES * 16));
 
+        // Index starts empty - it will be rebuilt from the log by the segment
         return MmapIndex{
             .mmap_file = mmap_file,
             .config = config,
-            .current_size = actual_size,
+            .current_size = 0,
         };
     }
 
@@ -249,7 +227,7 @@ test "MmapIndex: lookup nearest (less than or equal)" {
     try std.testing.expectEqual(@as(u32, 8192), result.pos);
 }
 
-test "MmapIndex: persistence across close/open" {
+test "MmapIndex: index treated as cache (rebuilds on open)" {
     const test_path = "/tmp/test_mmap_index_persistence.index";
     defer std.fs.deleteFileAbsolute(test_path) catch {};
 
@@ -270,16 +248,22 @@ test "MmapIndex: persistence across close/open" {
         try index.sync();
     }
 
-    // Reopen and verify
+    // Reopen - index starts empty as it's treated as a cache
+    // In practice, MmapSegment will rebuild it from the log
     {
         var index = try MmapIndex.open(test_path, config);
         defer index.close();
 
-        try std.testing.expectEqual(@as(u64, 3), index.getEntryCount());
+        // Index starts empty - it's just a cache, not the source of truth
+        try std.testing.expectEqual(@as(u64, 0), index.getEntryCount());
+
+        // Can still add new entries after opening
+        _ = try index.add(0, 0);
+        _ = try index.add(50, 20000);
 
         const result = try index.lookup(50);
-        try std.testing.expectEqual(@as(u32, 42), result.relative_offset);
-        try std.testing.expectEqual(@as(u32, 16384), result.pos);
+        try std.testing.expectEqual(@as(u32, 50), result.relative_offset);
+        try std.testing.expectEqual(@as(u32, 20000), result.pos);
     }
 }
 
