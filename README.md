@@ -78,5 +78,4 @@ Benchmark data is stored in `/tmp/zue_bench_results/`, and plots are in `benchma
 Contributions are welcome. Please open an issue to discuss your proposed changes.
 
 ## License
-
-This project is licensed under the MIT License. See the `LICENSE` file for details.
+[MIT](https://github.com/lostcache/zue/blob/main/LICENSE)
