@@ -234,32 +234,35 @@
 
             <section class="diagram-slide">
                 <h2>System Architecture</h2>
-                <div class="mermaid r-stretch">
+                <p style="margin-top: 1em">
+                    Single-leader replication with quorum commits
+                </p>
+                <div class="mermaid r-stretch" style="transform: scale(1.5); transform-origin: center;">
                     graph TD
-                    Client[Client App] --> Leader[Leader Node]
-                    Leader --> F1[Follower 1]
-                    Leader --> F2[Follower 2]
+                    Client[Client App]
 
-                    subgraph Cluster
-                    Leader
-                    F1
-                    F2
+                    subgraph Cluster [" "]
+                    Leader[Leader Node]
+                    F1[Follower 1]
+                    F2[Follower 2]
                     end
+
+                    Client --> Leader
+                    Leader --> F1
+                    Leader --> F2
 
                     style Client fill:#2a2a2a,stroke:#f9f,stroke-width:2px,color:#fff
                     style Leader fill:#2a2a2a,stroke:#42b983,stroke-width:4px,color:#fff
                     style F1 fill:#2a2a2a,stroke:#64b5f6,stroke-width:2px,color:#fff
                     style F2 fill:#2a2a2a,stroke:#64b5f6,stroke-width:2px,color:#fff
                 </div>
-                <p class="highlight" style="margin-top: 1em">
-                    <strong>Key:</strong> Single-leader replication with quorum commits
-                </p>
             </section>
 
             <section class="diagram-slide">
                 <h2>Log Structure</h2>
-                <div class="mermaid r-stretch">
+                <div class="mermaid r-stretch" style="transform: scale(2.0); transform-origin: center;">
                     classDiagram
+                    direction LR
                     class Log {
                     +dir_path
                     +active_segment
@@ -772,10 +775,34 @@
                                 clusterBorder: '#64b5f6',
                                 titleColor: '#fff',
                                 edgeLabelBackground: '#2a2a2a',
+                                actorBkg: '#2a2a2a',
+                                actorBorder: '#64b5f6',
+                                actorTextColor: '#fff',
+                                actorLineColor: '#64b5f6',
+                                signalColor: '#64b5f6',
+                                signalTextColor: '#fff',
+                                labelBoxBkgColor: '#2a2a2a',
+                                labelBoxBorderColor: '#64b5f6',
+                                labelTextColor: '#fff',
+                                loopTextColor: '#fff',
+                                activationBorderColor: '#ff6b6b',
+                                activationBkgColor: 'rgba(255, 107, 107, 0.2)',
+                                sequenceNumberColor: '#fff',
                             },
                             flowchart: {
                                 htmlLabels: false,
                                 curve: 'linear'
+                            },
+                            sequence: {
+                                actorMargin: 50,
+                                showSequenceNumbers: false,
+                                boxMargin: 10,
+                                boxTextMargin: 5,
+                                noteMargin: 10,
+                                messageMargin: 35,
+                                mirrorActors: false,
+                                bottomMarginAdj: 1,
+                                useMaxWidth: true,
                             },
                             fontSize: 16,
                         });
