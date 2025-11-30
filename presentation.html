@@ -67,7 +67,7 @@
         }
 
         .mermaid {
-            background: white;
+            background: transparent;
             padding: 0.5em;
             border-radius: 8px;
             display: flex;
@@ -99,8 +99,15 @@
             margin: 0.1em 0;
         }
 
-        .dense-content p {
+        .dense-content p,
+        .dense-content li {
+            font-size: 0.9em;
             margin: 0.2em 0;
+        }
+
+        .dense-content h3 {
+            font-size: 1.1em;
+            margin: 0.3em 0;
         }
     </style>
 </head>
@@ -465,21 +472,23 @@
 
             <section>
                 <h2>Project Evolution Learnings</h2>
-                <div class="box">
-                    <h3>Sprint 1: Know When to Pivot</h3>
-                    <p class="small">
-                        Get feedback early, pivot when necessary
-                    </p>
-                </div>
-                <div class="box">
-                    <h3>Sprint 2-3: Solid Foundation</h3>
-                    <p class="small">
-                        Upfront architectural work pays dividends
-                    </p>
-                </div>
-                <div class="box">
-                    <h3>Sprint 4-5: De-risk First</h3>
-                    <p class="small">Address architectural risks early</p>
+                <div style="font-size: 0.6em">
+                    <div class="box">
+                        <h3>Sprint 1: Know When to Pivot</h3>
+                        <p class="small">
+                            Get feedback early, pivot when necessary
+                        </p>
+                    </div>
+                    <div class="box">
+                        <h3>Sprint 2-3: Solid Foundation</h3>
+                        <p class="small">
+                            Upfront architectural work pays dividends
+                        </p>
+                    </div>
+                    <div class="box">
+                        <h3>Sprint 4-5: De-risk First</h3>
+                        <p class="small">Address architectural risks early</p>
+                    </div>
                 </div>
             </section>
 
@@ -572,40 +581,42 @@
                 </div>
             </section>
 
-            <section>
+            <section class="dense-content">
                 <h2>Course Learnings Applied</h2>
-                <div class="two-col small">
-                    <div class="box">
-                        <h3>Agile & Scrum</h3>
-                        <ul>
-                            <li>Sprint-based planning</li>
-                            <li>Retrospectives drive improvement</li>
-                            <li>Adaptive planning</li>
-                        </ul>
-                    </div>
-                    <div class="box">
-                        <h3>Software Engineering</h3>
-                        <ul>
-                            <li>Separation of concerns</li>
-                            <li>Comprehensive testing</li>
-                            <li>Clean APIs</li>
-                        </ul>
-                    </div>
-                    <div class="box">
-                        <h3>Risk Management</h3>
-                        <ul>
-                            <li>Identify risks early</li>
-                            <li>Tackle hard problems first</li>
-                            <li>Platform testing</li>
-                        </ul>
-                    </div>
-                    <div class="box">
-                        <h3>Documentation</h3>
-                        <ul>
-                            <li>Sprint reports with metrics</li>
-                            <li>Architecture docs</li>
-                            <li>Clear commits</li>
-                        </ul>
+                <div style="font-size: 0.6em">
+                    <div class="two-col small">
+                        <div class="box">
+                            <h3>Agile & Scrum</h3>
+                            <ul>
+                                <li>Sprint-based planning</li>
+                                <li>Retrospectives drive improvement</li>
+                                <li>Adaptive planning</li>
+                            </ul>
+                        </div>
+                        <div class="box">
+                            <h3>Software Engineering</h3>
+                            <ul>
+                                <li>Separation of concerns</li>
+                                <li>Comprehensive testing</li>
+                                <li>Clean APIs</li>
+                            </ul>
+                        </div>
+                        <div class="box">
+                            <h3>Risk Management</h3>
+                            <ul>
+                                <li>Identify risks early</li>
+                                <li>Tackle hard problems first</li>
+                                <li>Platform testing</li>
+                            </ul>
+                        </div>
+                        <div class="box">
+                            <h3>Documentation</h3>
+                            <ul>
+                                <li>Sprint reports with metrics</li>
+                                <li>Architecture docs</li>
+                                <li>Clear commits</li>
+                            </ul>
+                        </div>
                     </div>
                 </div>
             </section>
@@ -642,27 +653,29 @@
                 </div>
             </section>
 
-            <section>
+            <section class="dense-content">
                 <h2>Key Takeaways</h2>
-                <div class="box">
-                    <h3>1. Alignment Matters</h3>
-                    <p class="small">Early pivot enabled success</p>
-                </div>
-                <div class="box">
-                    <h3>2. Architecture is Foundation</h3>
-                    <p class="small">Clean design investment paid off</p>
-                </div>
-                <div class="box">
-                    <h3>3. Testing Builds Confidence</h3>
-                    <p class="small">
-                        117 unit + 12 integration tests caught critical bugs
-                    </p>
-                </div>
-                <div class="box">
-                    <h3>4. Continuous Learning</h3>
-                    <p class="small">
-                        Each sprint built on previous learnings
-                    </p>
+                <div style="font-size: 0.6em">
+                    <div class="box">
+                        <h3>1. Alignment Matters</h3>
+                        <p class="small">Early pivot enabled success</p>
+                    </div>
+                    <div class="box">
+                        <h3>2. Architecture is Foundation</h3>
+                        <p class="small">Clean design investment paid off</p>
+                    </div>
+                    <div class="box">
+                        <h3>3. Testing Builds Confidence</h3>
+                        <p class="small">
+                            117 unit + 12 integration tests caught critical bugs
+                        </p>
+                    </div>
+                    <div class="box">
+                        <h3>4. Continuous Learning</h3>
+                        <p class="small">
+                            Each sprint built on previous learnings
+                        </p>
+                    </div>
                 </div>
             </section>
 
