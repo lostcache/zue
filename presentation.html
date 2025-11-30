@@ -1,0 +1,739 @@
+<!doctype html>
+<html>
+
+<head>
+    <meta charset="utf-8" />
+    <title>Zue: Distributed Log</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@4.5.0/dist/reveal.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@4.5.0/dist/theme/black.css" />
+    <style>
+        .reveal h1 {
+            color: #42b983;
+            font-size: 2.2em;
+        }
+
+        .reveal h2 {
+            color: #42b983;
+            font-size: 1.6em;
+        }
+
+        .reveal h3 {
+            color: #64b5f6;
+            font-size: 1.2em;
+        }
+
+        .two-col {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 2em;
+        }
+
+        .three-col {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 1.5em;
+        }
+
+        .box {
+            background: rgba(255, 255, 255, 0.1);
+            padding: 1em;
+            border-radius: 8px;
+            margin: 0.5em 0;
+        }
+
+        .highlight {
+            background: #fff3cd;
+            color: #000;
+            padding: 0.5em 1em;
+            border-radius: 5px;
+        }
+
+        .success {
+            background: #d4edda;
+            color: #000;
+            padding: 0.5em 1em;
+            border-radius: 5px;
+        }
+
+        .metric {
+            font-size: 2.5em;
+            font-weight: bold;
+            color: #42b983;
+            text-align: center;
+        }
+
+        .small {
+            font-size: 0.8em;
+        }
+
+        .mermaid {
+            background: white;
+            padding: 1em;
+            border-radius: 8px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .mermaid svg {
+            max-width: 100% !important;
+            max-height: 600px !important;
+            height: auto !important;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="reveal">
+        <div class="slides">
+            <section>
+                <h1>Zue: Distributed Log</h1>
+                <h3>Capstone Project</h3>
+                <p>Journey from Kernel to Distributed Systems</p>
+                <p style="margin-top: 2em">
+                    <strong>Harsh Devisha</strong>
+                </p>
+            </section>
+
+            <section>
+                <h2>The Journey</h2>
+                <div class="two-col">
+                    <div class="box">
+                        <h3>Sprint 1: Original Goal</h3>
+                        <ul class="small">
+                            <li>Build OS kernel from scratch</li>
+                            <li>Process management</li>
+                            <li>Virtual memory (SV32)</li>
+                            <li>Network stack</li>
+                        </ul>
+                    </div>
+                    <div class="box">
+                        <h3>Sprint 1 Pivot: Zue</h3>
+                        <ul class="small">
+                            <li>Distributed log</li>
+                            <li>High-performance</li>
+                            <li>Implementation-heavy</li>
+                            <li>Aligned with interest</li>
+                        </ul>
+                    </div>
+                </div>
+                <p class="highlight" style="margin-top: 1em">
+                    <strong>Pivoted:</strong> Kernel work wouldn't focus on
+                    distributed systems
+                </p>
+            </section>
+
+            <section>
+                <h2>Project Objectives</h2>
+                <div class="three-col small">
+                    <div class="box">
+                        <h3>Storage Engine</h3>
+                        <ul>
+                            <li>Append-only log</li>
+                            <li>Sparse index</li>
+                            <li>CRC validation</li>
+                        </ul>
+                    </div>
+                    <div class="box">
+                        <h3>Replication</h3>
+                        <ul>
+                            <li>Raft-like consensus</li>
+                            <li>Quorum commits</li>
+                            <li>Auto recovery</li>
+                        </ul>
+                    </div>
+                    <div class="box">
+                        <h3>Quality</h3>
+                        <ul>
+                            <li>Non-blocking I/O</li>
+                            <li>117 unit tests</li>
+                            <li>Cross-platform</li>
+                        </ul>
+                    </div>
+                </div>
+            </section>
+
+            <section>
+                <h2>Sprint Timeline</h2>
+                <table class="small">
+                    <tr>
+                        <th>Sprint</th>
+                        <th>Focus</th>
+                        <th>Deliverables</th>
+                    </tr>
+                    <tr>
+                        <td>1</td>
+                        <td>Pivot</td>
+                        <td>Kernel → Distributed Log</td>
+                    </tr>
+                    <tr>
+                        <td>2</td>
+                        <td>Storage</td>
+                        <td>Record serialization, log design</td>
+                    </tr>
+                    <tr>
+                        <td>3</td>
+                        <td>Architecture</td>
+                        <td>Sparse index, CRC validation</td>
+                    </tr>
+                    <tr>
+                        <td>4</td>
+                        <td>Foundation</td>
+                        <td>Non-blocking server, protocols</td>
+                    </tr>
+                    <tr>
+                        <td>5</td>
+                        <td>Replication</td>
+                        <td>Leader/follower, tests, mmap</td>
+                    </tr>
+                </table>
+                <p style="margin-top: 1em">
+                    <strong>5 sprints, ~10 weeks</strong>
+                </p>
+            </section>
+
+            <section>
+                <h2>System Architecture</h2>
+                <div class="mermaid">
+                    graph TD
+                    Client[Client App] --> Leader[Leader Node]
+                    Leader --> F1[Follower 1]
+                    Leader --> F2[Follower 2]
+
+                    subgraph Cluster
+                    Leader
+                    F1
+                    F2
+                    end
+
+                    style Client fill:#f9f,stroke:#333,stroke-width:2px
+                    style Leader fill:#42b983,stroke:#333,stroke-width:4px
+                    style F1 fill:#64b5f6,stroke:#333,stroke-width:2px
+                    style F2 fill:#64b5f6,stroke:#333,stroke-width:2px
+                </div>
+                <p class="highlight" style="margin-top: 1em">
+                    <strong>Key:</strong> Single-leader replication with quorum commits
+                </p>
+            </section>
+
+            <section>
+                <h2>Log Structure</h2>
+                <div class="mermaid">
+                    classDiagram
+                    class Log {
+                    +dir_path
+                    +active_segment
+                    +segments
+                    }
+                    class Segment {
+                    +base_offset
+                    +log_file
+                    +index_file
+                    }
+                    class Index {
+                    +sparse_entries
+                    }
+                    class Record {
+                    +key
+                    +value
+                    +crc
+                    }
+
+                    Log *-- Segment
+                    Segment *-- Index
+                    Segment *-- Record
+                </div>
+            </section>
+
+            <section>
+                <h2>Replication Flow</h2>
+                <div class="mermaid">
+                    sequenceDiagram
+                    participant C as Client
+                    participant L as Leader
+                    participant F as Follower
+
+                    C->>L: Append Record
+                    activate L
+                    L->>L: Write Local Log
+                    par Parallel Replication
+                    L->>F: Replicate Entries
+                    activate F
+                    F->>F: Validate and Write
+                    F-->>L: Success match_index
+                    deactivate F
+                    and
+                    L->>L: Wait for Quorum
+                    end
+                    L->>L: Commit and Advance Index
+                    L-->>C: Success offset
+                    deactivate L
+                </div>
+            </section>
+
+            <section>
+                <h2>Repair State Machine</h2>
+                <div class="mermaid">
+                    graph TD
+                    Replicating -->|Offset Mismatch| NeedsRepair
+                    NeedsRepair -->|Send Probe| WaitProbe
+
+                    subgraph Probing Loop
+                    WaitProbe -->|Match Found| Success
+                    WaitProbe -->|Mismatch| Retry
+                    Retry -->|Send Probe prev-1| WaitProbe
+                    end
+
+                    Success --> Streaming
+                    Streaming -->|Caught Up| Replicating
+
+                    style Replicating fill:#42b983,stroke:#333,stroke-width:2px
+                    style NeedsRepair fill:#ff6b6b,stroke:#333,stroke-width:2px
+                </div>
+                <p class="small">Fully async, non-blocking repair process</p>
+            </section>
+
+            <section>
+                <h2>Technical Achievements</h2>
+                <div class="two-col">
+                    <div class="box">
+                        <h3>Storage Engine</h3>
+                        <ul class="small">
+                            <li>Append-only log</li>
+                            <li>O(log n) sparse index</li>
+                            <li>CRC32 validation</li>
+                            <li>
+                                <strong>Memory-mapped I/O:</strong>
+                                <ul>
+                                    <li>10-100x faster index</li>
+                                    <li>5-50x faster reads</li>
+                                    <li>3-20x faster writes</li>
+                                </ul>
+                            </li>
+                        </ul>
+                    </div>
+                    <div class="box">
+                        <h3>Distributed Replication</h3>
+                        <ul class="small">
+                            <li>Raft-like consensus</li>
+                            <li>Quorum-based commits</li>
+                            <li>Non-blocking async</li>
+                            <li>Leader-driven repair</li>
+                            <li>Inline recovery</li>
+                            <li>Auto failure detection</li>
+                        </ul>
+                    </div>
+                </div>
+            </section>
+
+            <section>
+                <h2>Challenge: Head-of-Line Blocking</h2>
+                <div class="box">
+                    <p>
+                        <strong>Problem:</strong> Blocking repair stalled
+                        entire server when followers were slow
+                    </p>
+                    <p>
+                        <strong>Solution:</strong> 4-state async state
+                        machine with poll()-based readiness checks
+                    </p>
+                    <ul class="small">
+                        <li>State 1: Replicating (normal)</li>
+                        <li>State 2: Needs Repair (lag detected)</li>
+                        <li>State 3: Repairing Probe (send probe)</li>
+                        <li>State 4: Repairing Stream (catch-up)</li>
+                    </ul>
+                    <p>
+                        <strong>Result:</strong> True non-blocking - server
+                        never stalls
+                    </p>
+                </div>
+            </section>
+
+            <section>
+                <h2>More Critical Challenges</h2>
+                <div class="box">
+                    <h3>Event-Driven Architecture (Sprint 4)</h3>
+                    <div class="two-col small">
+                        <div>
+                            <strong>Before:</strong>
+                            <ul>
+                                <li>Single-client blocking</li>
+                                <li>Sequential processing</li>
+                            </ul>
+                        </div>
+                        <div>
+                            <strong>After:</strong>
+                            <ul>
+                                <li>Poll-based event loop</li>
+                                <li>Concurrent connections</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+                <div class="box" style="margin-top: 1em">
+                    <h3>Platform Differences (Sprint 5)</h3>
+                    <p class="small">
+                        <strong>Problem:</strong> Linux has mremap(), macOS
+                        doesn't
+                    </p>
+                    <p class="small">
+                        <strong>Solution:</strong> Platform-specific
+                        abstractions
+                    </p>
+                </div>
+            </section>
+
+            <section>
+                <h2>Performance Gains</h2>
+                <div class="metric">10-100x</div>
+                <p>
+                    <strong>Faster Index Lookups</strong> (binary search in
+                    memory, 0 syscalls)
+                </p>
+                <div class="metric">5-50x</div>
+                <p>
+                    <strong>Faster Log Reads</strong> (direct memory access,
+                    zero-copy)
+                </p>
+                <div class="metric">3-20x</div>
+                <p><strong>Faster Writes</strong> (direct memory writes)</p>
+            </section>
+
+            <section>
+                <h2>Technical Learnings</h2>
+                <div class="three-col small">
+                    <div class="box">
+                        <h3>Distributed Systems</h3>
+                        <ul>
+                            <li>Raft semantics simplify correctness</li>
+                            <li>Quorum provides consistency</li>
+                            <li>Offset-based lag tracking</li>
+                        </ul>
+                    </div>
+                    <div class="box">
+                        <h3>Performance</h3>
+                        <ul>
+                            <li>mmap dramatic improvements</li>
+                            <li>Async state machines essential</li>
+                            <li>Zero-allocation for hot paths</li>
+                        </ul>
+                    </div>
+                    <div class="box">
+                        <h3>Software Eng</h3>
+                        <ul>
+                            <li>Integration tests catch critical bugs</li>
+                            <li>Type-safe optionals</li>
+                            <li>Clean separation</li>
+                        </ul>
+                    </div>
+                </div>
+            </section>
+
+            <section>
+                <h2>Project Evolution Learnings</h2>
+                <div class="box">
+                    <h3>Sprint 1: Know When to Pivot</h3>
+                    <p class="small">
+                        Get feedback early, pivot when necessary
+                    </p>
+                </div>
+                <div class="box">
+                    <h3>Sprint 2-3: Solid Foundation</h3>
+                    <p class="small">
+                        Upfront architectural work pays dividends
+                    </p>
+                </div>
+                <div class="box">
+                    <h3>Sprint 4-5: De-risk First</h3>
+                    <p class="small">Address architectural risks early</p>
+                </div>
+            </section>
+
+            <section>
+                <h2>Project Management</h2>
+                <div class="two-col">
+                    <div class="box">
+                        <h3>Tools</h3>
+                        <ul class="small">
+                            <li>
+                                <strong>JIRA:</strong> Sprint planning,
+                                burndown
+                            </li>
+                            <li><strong>Git:</strong> Version control</li>
+                            <li><strong>LaTeX:</strong> Documentation</li>
+                        </ul>
+                    </div>
+                    <div class="box">
+                        <h3>Processes</h3>
+                        <ul class="small">
+                            <li>Sprint Planning</li>
+                            <li>Sprint Review</li>
+                            <li>Retrospective</li>
+                            <li>Backlog Grooming</li>
+                        </ul>
+                    </div>
+                </div>
+            </section>
+
+            <section>
+                <h2>Agile Practices</h2>
+                <div class="two-col">
+                    <div class="box">
+                        <h3>Sprint Structure</h3>
+                        <ol class="small">
+                            <li>Goal Definition</li>
+                            <li>Backlog Selection</li>
+                            <li>Implementation</li>
+                            <li>Testing</li>
+                            <li>Review & Retrospective</li>
+                            <li>Re-grooming</li>
+                        </ol>
+                    </div>
+                    <div class="box">
+                        <h3>Adaptive Planning</h3>
+                        <ul class="small">
+                            <li>Sprint 1: Major pivot</li>
+                            <li>Sprint 2: Distributed-first</li>
+                            <li>Sprint 3: Refactoring</li>
+                            <li>Sprint 4: De-risk event loop</li>
+                            <li>Sprint 5: mmap optimization</li>
+                        </ul>
+                    </div>
+                </div>
+            </section>
+
+            <section>
+                <h2>Test-Driven Development</h2>
+                <table class="small">
+                    <tr>
+                        <th>Sprint</th>
+                        <th>Test Count</th>
+                        <th>Focus</th>
+                    </tr>
+                    <tr>
+                        <td>2-3</td>
+                        <td>--</td>
+                        <td>Core modules</td>
+                    </tr>
+                    <tr>
+                        <td>4</td>
+                        <td>77 → 165</td>
+                        <td>Event loop, network</td>
+                    </tr>
+                    <tr>
+                        <td>5</td>
+                        <td>117 + 12</td>
+                        <td>Full replication</td>
+                    </tr>
+                </table>
+                <div class="box" style="margin-top: 1em">
+                    <p class="small">
+                        <strong>Scenarios:</strong> Replication, quorum,
+                        failures, catch-up, partitions, concurrent writes
+                    </p>
+                    <p class="success small">
+                        <strong>Impact:</strong> Caught 2 critical bugs
+                        before production
+                    </p>
+                </div>
+            </section>
+
+            <section>
+                <h2>Course Learnings Applied</h2>
+                <div class="two-col small">
+                    <div class="box">
+                        <h3>Agile & Scrum</h3>
+                        <ul>
+                            <li>Sprint-based planning</li>
+                            <li>Retrospectives drive improvement</li>
+                            <li>Adaptive planning</li>
+                        </ul>
+                    </div>
+                    <div class="box">
+                        <h3>Software Engineering</h3>
+                        <ul>
+                            <li>Separation of concerns</li>
+                            <li>Comprehensive testing</li>
+                            <li>Clean APIs</li>
+                        </ul>
+                    </div>
+                    <div class="box">
+                        <h3>Risk Management</h3>
+                        <ul>
+                            <li>Identify risks early</li>
+                            <li>Tackle hard problems first</li>
+                            <li>Platform testing</li>
+                        </ul>
+                    </div>
+                    <div class="box">
+                        <h3>Documentation</h3>
+                        <ul>
+                            <li>Sprint reports with metrics</li>
+                            <li>Architecture docs</li>
+                            <li>Clear commits</li>
+                        </ul>
+                    </div>
+                </div>
+            </section>
+
+            <section>
+                <h2>Personal Growth</h2>
+                <div class="three-col small">
+                    <div class="box">
+                        <h3>Technical</h3>
+                        <ul>
+                            <li>Distributed systems</li>
+                            <li>Systems programming</li>
+                            <li>Performance optimization</li>
+                            <li>Cross-platform dev</li>
+                        </ul>
+                    </div>
+                    <div class="box">
+                        <h3>Soft Skills</h3>
+                        <ul>
+                            <li>Project planning</li>
+                            <li>Knowing when to pivot</li>
+                            <li>Breaking down problems</li>
+                            <li>Pragmatism</li>
+                        </ul>
+                    </div>
+                    <div class="box">
+                        <h3>Engineering Judgment</h3>
+                        <ul>
+                            <li>When to optimize</li>
+                            <li>Understanding trade-offs</li>
+                            <li>Technical debt mgmt</li>
+                        </ul>
+                    </div>
+                </div>
+            </section>
+
+            <section>
+                <h2>Key Takeaways</h2>
+                <div class="box">
+                    <h3>1. Alignment Matters</h3>
+                    <p class="small">Early pivot enabled success</p>
+                </div>
+                <div class="box">
+                    <h3>2. Architecture is Foundation</h3>
+                    <p class="small">Clean design investment paid off</p>
+                </div>
+                <div class="box">
+                    <h3>3. Testing Builds Confidence</h3>
+                    <p class="small">
+                        117 unit + 12 integration tests caught critical bugs
+                    </p>
+                </div>
+                <div class="box">
+                    <h3>4. Continuous Learning</h3>
+                    <p class="small">
+                        Each sprint built on previous learnings
+                    </p>
+                </div>
+            </section>
+
+            <section>
+                <h2>Project Status & Future Work</h2>
+                <div class="two-col">
+                    <div class="box">
+                        <h3>Current Status</h3>
+                        <p class="small">
+                            <strong>Production-ready distributed log:</strong>
+                        </p>
+                        <ul class="small">
+                            <li>Raft-like replication</li>
+                            <li>5-100x performance gains</li>
+                            <li>117 unit + 12 integration tests</li>
+                            <li>Cross-platform</li>
+                        </ul>
+                    </div>
+                    <div class="box">
+                        <h3>Future Work</h3>
+                        <ul class="small">
+                            <li>Cluster monitoring APIs</li>
+                            <li>Leader election</li>
+                            <li>Operational tooling</li>
+                            <li>Performance tuning</li>
+                        </ul>
+                    </div>
+                </div>
+                <p class="highlight" style="margin-top: 1em">
+                    Continue as personal project
+                </p>
+            </section>
+
+            <section>
+                <h2>Live Demo</h2>
+                <div class="box">
+                    <h3>Multi-node Cluster</h3>
+                    <ul>
+                        <li>✅ Leader & 2 followers</li>
+                        <li>✅ Client writes with quorum confirmation</li>
+                        <li>✅ Follower failure & recovery</li>
+                        <li>✅ Automatic catch-up mechanism</li>
+                    </ul>
+                </div>
+            </section>
+
+            <section>
+                <h1>Thank You!</h1>
+                <h2>Questions?</h2>
+                <p style="margin-top: 2em">
+                    <strong>Harsh Devisha</strong>
+                </p>
+                <p style="margin-top: 1.5em; font-size: 0.8em">
+                    <strong>Zue GitHub:</strong>
+                    <a href="https://github.com/lostcache/zue">github.com/lostcache/zue</a><br />
+                    <strong>Email:</strong> harshdevisha91@gmail.com<br />
+                    <strong>GitHub:</strong>
+                    <a href="https://github.com/lostcache">github.com/lostcache</a>
+                </p>
+            </section>
+        </div>
+    </div>
+    <script src="https://cdn.jsdelivr.net/npm/reveal.js@4.5.0/dist/reveal.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.0/dist/mermaid.min.js"></script>
+    <script>
+        Reveal.initialize({
+            hash: true,
+            controls: true,
+            progress: true,
+            center: true,
+            transition: "slide",
+            width: 1280,
+            height: 720,
+            plugins: [
+                {
+                    id: 'mermaid',
+                    init: function (reveal) {
+                        mermaid.initialize({
+                            startOnLoad: false,
+                            theme: 'default',
+                            securityLevel: 'loose',
+                        });
+                        const nodes = document.querySelectorAll('.mermaid');
+                        const promises = [];
+                        nodes.forEach(function (node, index) {
+                            const graphDefinition = node.textContent.trim();
+                            const id = 'mermaid-' + index;
+                            promises.push(
+                                mermaid.render(id, graphDefinition)
+                                    .then(({ svg }) => {
+                                        node.innerHTML = svg;
+                                    })
+                                    .catch(error => {
+                                        console.error('Mermaid rendering error:', error);
+                                        node.innerHTML = '<pre class="error">' + error + '</pre>';
+                                    })
+                            );
+                        });
+                        return Promise.all(promises);
+                    }
+                }
+            ]
+        });
+    </script>
+</body>
+
+</html>
