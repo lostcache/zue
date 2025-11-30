@@ -215,6 +215,26 @@ pub fn build(b: *std.Build) void {
         run_server.addArgs(args);
     }
 
+    // CLI Client executable
+    const client_exe = b.addExecutable(.{
+        .name = "zue-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/cli_client.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    b.installArtifact(client_exe);
+
+    const run_client = b.addRunArtifact(client_exe);
+    const client_step = b.step("client", "Run the Zue CLI client");
+    client_step.dependOn(&run_client.step);
+    run_client.step.dependOn(b.getInstallStep());
+
+    if (b.args) |args| {
+        run_client.addArgs(args);
+    }
+
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
     // The Zig build system is entirely implemented in userland, which means
