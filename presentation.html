@@ -83,7 +83,8 @@
         /* Ensure font consistency */
         .node foreignObject span,
         .node text {
-            font-family: "Source Sans Pro", Helvetica, sans-serif !important;
+            font-family:
+                "Source Sans Pro", Helvetica, sans-serif !important;
         }
 
         .diagram-slide {
@@ -237,20 +238,17 @@
                 <p style="margin-top: 1em">
                     Single-leader replication with quorum commits
                 </p>
-                <div class="mermaid r-stretch" style="transform: scale(1.5); transform-origin: center;">
+                <div class="mermaid r-stretch" style="transform: scale(1.5); transform-origin: center">
                     graph TD
                     Client[Client App]
-
                     subgraph Cluster [" "]
                     Leader[Leader Node]
                     F1[Follower 1]
                     F2[Follower 2]
                     end
-
                     Client --> Leader
                     Leader --> F1
                     Leader --> F2
-
                     style Client fill:#2a2a2a,stroke:#f9f,stroke-width:2px,color:#fff
                     style Leader fill:#2a2a2a,stroke:#42b983,stroke-width:4px,color:#fff
                     style F1 fill:#2a2a2a,stroke:#64b5f6,stroke-width:2px,color:#fff
@@ -260,7 +258,7 @@
 
             <section class="diagram-slide">
                 <h2>Log Structure</h2>
-                <div class="mermaid r-stretch" style="transform: scale(2.0); transform-origin: center;">
+                <div class="mermaid r-stretch" style="transform: scale(2); transform-origin: center">
                     classDiagram
                     direction LR
                     class Log {
@@ -281,7 +279,6 @@
                     +value
                     +crc
                     }
-
                     Log *-- MmapSegment
                     MmapSegment *-- MmapIndex
                     MmapSegment *-- Record
@@ -295,7 +292,6 @@
                     participant C as Client
                     participant L as Leader
                     participant F as Follower
-
                     C->>L: Append Record
                     activate L
                     L->>L: Append to Mmap
@@ -315,25 +311,37 @@
             </section>
 
             <section class="diagram-slide">
-                <h2>Repair State Machine</h2>
-                <div class="mermaid r-stretch">
-                    graph TD
-                    Replicating -->|Offset Mismatch| NeedsRepair
-                    NeedsRepair -->|Send Probe| WaitProbe
+                <h2>Follower Repair State Machine</h2>
+                <p class="small">Async non-blocking recovery process</p>
+                <div class="mermaid r-stretch" style="transform: scale(1); transform-origin: center">
+                    flowchart LR
+                    Start([Replicating])
+                    CheckLag{Follower\nLagging?}
+                    Repair[Needs Repair?]
+                    SendProbe[Send Probe Entry]
+                    ProbeResult{Probe\nAccepted?}
+                    SendStream[Stream Missing Entries\nin Batches]
+                    StreamResult{Caught\nUp?}
 
-                    subgraph Probing Loop
-                    WaitProbe -->|Match Found| Success
-                    WaitProbe -->|Mismatch| Retry
-                    Retry -->|Send Probe prev-1| WaitProbe
-                    end
+                    Start --> CheckLag
+                    CheckLag -->|Yes| Repair
+                    CheckLag -->|No| Start
+                    Repair --> SendProbe
+                    SendProbe --> ProbeResult
+                    ProbeResult -->|No: Mismatch| Repair
+                    ProbeResult -->|Yes: Match| SendStream
+                    SendStream --> StreamResult
+                    StreamResult -->|No: More Entries| SendStream
+                    StreamResult -->|Yes| Start
 
-                    Success --> Streaming
-                    Streaming -->|Caught Up| Replicating
-
-                    style Replicating fill:#2a2a2a,stroke:#42b983,stroke-width:2px,color:#fff
-                    style NeedsRepair fill:#2a2a2a,stroke:#ff6b6b,stroke-width:2px,color:#fff
+                    style Start fill:#2a2a2a,stroke:#42b983,stroke-width:4px,color:#fff
+                    style Repair fill:#2a2a2a,stroke:#ff6b6b,stroke-width:3px,color:#fff
+                    style SendProbe fill:#2a2a2a,stroke:#ffa500,stroke-width:2px,color:#fff
+                    style SendStream fill:#2a2a2a,stroke:#64b5f6,stroke-width:2px,color:#fff
+                    style CheckLag fill:#2a2a2a,stroke:#fff,stroke-width:2px,color:#fff
+                    style ProbeResult fill:#2a2a2a,stroke:#fff,stroke-width:2px,color:#fff
+                    style StreamResult fill:#2a2a2a,stroke:#fff,stroke-width:2px,color:#fff
                 </div>
-                <p class="small">Fully async, non-blocking repair process</p>
             </section>
 
             <section class="dense-content">
@@ -490,7 +498,9 @@
                     </div>
                     <div class="box">
                         <h3>Sprint 4-5: De-risk First</h3>
-                        <p class="small">Address architectural risks early</p>
+                        <p class="small">
+                            Address architectural risks early
+                        </p>
                     </div>
                 </div>
             </section>
@@ -665,12 +675,15 @@
                     </div>
                     <div class="box">
                         <h3>2. Architecture is Foundation</h3>
-                        <p class="small">Clean design investment paid off</p>
+                        <p class="small">
+                            Clean design investment paid off
+                        </p>
                     </div>
                     <div class="box">
                         <h3>3. Testing Builds Confidence</h3>
                         <p class="small">
-                            117 unit + 12 integration tests caught critical bugs
+                            117 unit + 12 integration tests caught critical
+                            bugs
                         </p>
                     </div>
                     <div class="box">
@@ -717,10 +730,10 @@
                 <div class="box">
                     <h3>Multi-node Cluster</h3>
                     <ul>
-                        <li>✅ Leader & 2 followers</li>
-                        <li>✅ Client writes with quorum confirmation</li>
-                        <li>✅ Follower failure & recovery</li>
-                        <li>✅ Automatic catch-up mechanism</li>
+                        <li>Leader & 2 followers</li>
+                        <li>Client writes with quorum confirmation</li>
+                        <li>Follower failure & recovery</li>
+                        <li>Automatic catch-up mechanism</li>
                     </ul>
                 </div>
             </section>
@@ -754,44 +767,45 @@
             height: 720,
             plugins: [
                 {
-                    id: 'mermaid',
+                    id: "mermaid",
                     init: function (reveal) {
                         mermaid.initialize({
                             startOnLoad: false,
-                            securityLevel: 'loose',
-                            theme: 'base',
+                            securityLevel: "loose",
+                            theme: "base",
                             themeVariables: {
                                 darkMode: true,
-                                background: 'transparent',
-                                primaryColor: '#2a2a2a',
-                                primaryTextColor: '#fff',
-                                primaryBorderColor: '#42b983',
-                                lineColor: '#64b5f6',
-                                secondaryColor: '#ff6b6b',
-                                tertiaryColor: '#2a2a2a',
-                                mainBkg: 'transparent',
-                                nodeBorder: '#42b983',
-                                clusterBkg: 'rgba(255,255,255,0.05)',
-                                clusterBorder: '#64b5f6',
-                                titleColor: '#fff',
-                                edgeLabelBackground: '#2a2a2a',
-                                actorBkg: '#2a2a2a',
-                                actorBorder: '#64b5f6',
-                                actorTextColor: '#fff',
-                                actorLineColor: '#64b5f6',
-                                signalColor: '#64b5f6',
-                                signalTextColor: '#fff',
-                                labelBoxBkgColor: '#2a2a2a',
-                                labelBoxBorderColor: '#64b5f6',
-                                labelTextColor: '#fff',
-                                loopTextColor: '#fff',
-                                activationBorderColor: '#ff6b6b',
-                                activationBkgColor: 'rgba(255, 107, 107, 0.2)',
-                                sequenceNumberColor: '#fff',
+                                background: "transparent",
+                                primaryColor: "#2a2a2a",
+                                primaryTextColor: "#fff",
+                                primaryBorderColor: "#42b983",
+                                lineColor: "#64b5f6",
+                                secondaryColor: "#ff6b6b",
+                                tertiaryColor: "#2a2a2a",
+                                mainBkg: "transparent",
+                                nodeBorder: "#42b983",
+                                clusterBkg: "rgba(255,255,255,0.05)",
+                                clusterBorder: "#64b5f6",
+                                titleColor: "#fff",
+                                edgeLabelBackground: "#2a2a2a",
+                                actorBkg: "#2a2a2a",
+                                actorBorder: "#64b5f6",
+                                actorTextColor: "#fff",
+                                actorLineColor: "#64b5f6",
+                                signalColor: "#64b5f6",
+                                signalTextColor: "#fff",
+                                labelBoxBkgColor: "#2a2a2a",
+                                labelBoxBorderColor: "#64b5f6",
+                                labelTextColor: "#fff",
+                                loopTextColor: "#fff",
+                                activationBorderColor: "#ff6b6b",
+                                activationBkgColor:
+                                    "rgba(255, 107, 107, 0.2)",
+                                sequenceNumberColor: "#fff",
                             },
                             flowchart: {
                                 htmlLabels: false,
-                                curve: 'linear'
+                                curve: "linear",
                             },
                             sequence: {
                                 actorMargin: 50,
@@ -806,26 +820,33 @@
                             },
                             fontSize: 16,
                         });
-                        const nodes = document.querySelectorAll('.mermaid');
+                        const nodes = document.querySelectorAll(".mermaid");
                         const promises = [];
                         nodes.forEach(function (node, index) {
                             const graphDefinition = node.textContent.trim();
-                            const id = 'mermaid-' + index;
+                            const id = "mermaid-" + index;
                             promises.push(
-                                mermaid.render(id, graphDefinition)
+                                mermaid
+                                    .render(id, graphDefinition)
                                     .then(({ svg }) => {
                                         node.innerHTML = svg;
                                     })
-                                    .catch(error => {
-                                        console.error('Mermaid rendering error:', error);
-                                        node.innerHTML = '<pre class="error">' + error + '</pre>';
-                                    })
+                                    .catch((error) => {
+                                        console.error(
+                                            "Mermaid rendering error:",
+                                            error,
+                                        );
+                                        node.innerHTML =
+                                            '<pre class="error">' +
+                                            error +
+                                            "</pre>";
+                                    }),
                             );
                         });
                         return Promise.all(promises);
-                    }
-                }
-            ]
+                    },
+                },
+            ],
         });
     </script>
 </body>
