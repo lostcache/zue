@@ -155,7 +155,7 @@
 
             <section>
                 <h2 class="r-fit-text">Project Objectives</h2>
-                <div class="three-col small">
+                <div class="two-col medium">
                     <div class="box">
                         <h3>Storage Engine</h3>
                         <ul>
@@ -173,64 +173,7 @@
                             <li>Non-blocking I/O</li>
                         </ul>
                     </div>
-                    <div class="box">
-                        <h3>Quality</h3>
-                        <ul>
-                            <li>117 unit tests</li>
-                            <li>Cross-platform</li>
-                        </ul>
-                    </div>
                 </div>
-            </section>
-
-            <section>
-                <h2>Sprint Timeline (1-3)</h2>
-                <table class="small">
-                    <tr>
-                        <th>Sprint</th>
-                        <th>Focus</th>
-                        <th>Deliverables</th>
-                    </tr>
-                    <tr>
-                        <td>1</td>
-                        <td>Pivot</td>
-                        <td>Kernel → Distributed Log</td>
-                    </tr>
-                    <tr>
-                        <td>2</td>
-                        <td>Storage</td>
-                        <td>Record serialization, log design</td>
-                    </tr>
-                    <tr>
-                        <td>3</td>
-                        <td>Architecture</td>
-                        <td>Sparse index, CRC validation</td>
-                    </tr>
-                </table>
-            </section>
-
-            <section>
-                <h2>Sprint Timeline (4-5)</h2>
-                <table class="small">
-                    <tr>
-                        <th>Sprint</th>
-                        <th>Focus</th>
-                        <th>Deliverables</th>
-                    </tr>
-                    <tr>
-                        <td>4</td>
-                        <td>Foundation</td>
-                        <td>Non-blocking server, protocols</td>
-                    </tr>
-                    <tr>
-                        <td>5</td>
-                        <td>Replication</td>
-                        <td>Leader/follower, tests, mmap</td>
-                    </tr>
-                </table>
-                <p style="margin-top: 1em">
-                    <strong>Total: ~10 weeks</strong>
-                </p>
             </section>
 
             <section class="diagram-slide">
@@ -258,30 +201,151 @@
 
             <section class="diagram-slide">
                 <h2>Log Structure</h2>
-                <div class="mermaid r-stretch" style="transform: scale(2); transform-origin: center">
-                    classDiagram
-                    direction LR
-                    class Log {
-                    +dir_path
-                    +active_segment
-                    +segments
-                    }
-                    class MmapSegment {
-                    +base_offset
-                    +log_mmap
-                    +index_mmap
-                    }
-                    class MmapIndex {
-                    +sparse_entries
-                    }
-                    class Record {
-                    +key
-                    +value
-                    +crc
-                    }
-                    Log *-- MmapSegment
-                    MmapSegment *-- MmapIndex
-                    MmapSegment *-- Record
+                <div class="mermaid r-stretch" style="transform: scale(1); transform-origin: center">
+                    graph LR
+                    subgraph Log [Log]
+                    direction TB
+                    S1[Segment 0]
+                    S2[Segment 1]
+                    S3[Segment ...]
+                    end
+
+                    subgraph Segment [Segment]
+                    direction TB
+                    IndexFile[Index File]
+                    LogFile[Log File]
+                    end
+
+                    subgraph Index ["Index Entry (12B)"]
+                    direction TB
+                    I_CRC["CRC (4B)"]
+                    I_Off["Rel Offset (4B)"]
+                    I_Pos["Position (4B)"]
+                    end
+
+                    subgraph Record ["Log Record (20B Header)"]
+                    direction TB
+                    R_CRC["CRC (4B)"]
+                    R_TS["Timestamp (8B)"]
+                    R_Key_Len["Key len (4B)"]
+                    R_Key["Key"]
+                    R_Val_Len["Value len (4B)"]
+                    R_Val["Value"]
+                    end
+
+                    S2 --> Segment
+                    IndexFile --> Index
+                    LogFile --> Record
+
+                    style Log fill:transparent,stroke:#fff,stroke-width:2px,color:#fff
+                    style Segment fill:transparent,stroke:#fff,stroke-width:2px,color:#fff
+                    style Index fill:transparent,stroke:#fff,stroke-width:2px,color:#fff
+                    style Record fill:transparent,stroke:#fff,stroke-width:2px,color:#fff
+
+                    style S1 fill:#2a2a2a,stroke:#42b983,stroke-width:2px,color:#fff
+                    style S2 fill:#2a2a2a,stroke:#42b983,stroke-width:4px,color:#fff
+                    style S3 fill:#2a2a2a,stroke:#42b983,stroke-width:2px,color:#fff
+
+                    style IndexFile fill:#2a2a2a,stroke:#64b5f6,stroke-width:2px,color:#fff
+                    style LogFile fill:#2a2a2a,stroke:#64b5f6,stroke-width:2px,color:#fff
+
+                    style I_Off fill:#2a2a2a,stroke:#ff6b6b,stroke-width:2px,color:#fff
+                    style I_Pos fill:#2a2a2a,stroke:#ff6b6b,stroke-width:2px,color:#fff
+                    style I_CRC fill:#2a2a2a,stroke:#ff6b6b,stroke-width:2px,color:#fff
+
+                    style R_CRC fill:#2a2a2a,stroke:#ffa500,stroke-width:2px,color:#fff
+                    style R_TS fill:#2a2a2a,stroke:#ffa500,stroke-width:2px,color:#fff
+                    style R_Key_Len fill:#2a2a2a,stroke:#ffa500,stroke-width:2px,color:#fff
+                    style R_Key fill:#2a2a2a,stroke:#ffa500,stroke-width:2px,color:#fff
+                    style R_Val_Len fill:#2a2a2a,stroke:#ffa500,stroke-width:2px,color:#fff
+                    style R_Val fill:#2a2a2a,stroke:#ffa500,stroke-width:2px,color:#fff
+                </div>
+            </section>
+
+            <section class="diagram-slide">
+                <h2>Follower Event Loop</h2>
+                <p class="small">Processes replication and heartbeat requests from leader</p>
+                <div class="mermaid r-stretch" style="transform: scale(1); transform-origin: center">
+                    flowchart LR
+                    Start([Start Loop])
+                    Ready{Sockets\nReady?}
+                    Type{Socket\nType?}
+                    Accept[Accept New\nConnection]
+                    MsgType{Message\nType?}
+                    ClientReq[Client Request:\nReject Redirect to Leader]
+                    Replicate[Replicate Request:\nValidate Offset & Append]
+                    Heartbeat[Heartbeat Request:\nUpdate Timestamp]
+                    Cleanup[Send\nResponse]
+
+                    Start --> Ready
+                    Ready -->|No| Start
+                    Ready -->|Yes| Type
+                    Type -->|Listener| Accept
+                    Type -->|Client| MsgType
+                    Accept --> Cleanup
+                    MsgType -->|Append/Read| ClientReq
+                    MsgType -->|Replicate| Replicate
+                    MsgType -->|Heartbeat| Heartbeat
+                    ClientReq --> Cleanup
+                    Replicate --> Cleanup
+                    Heartbeat --> Cleanup
+                    Cleanup --> Start
+
+                    style Start fill:#2a2a2a,stroke:#42b983,stroke-width:4px,color:#fff
+                    style Replicate fill:#2a2a2a,stroke:#ffa500,stroke-width:3px,color:#fff
+                    style Heartbeat fill:#2a2a2a,stroke:#ffa500,stroke-width:2px,color:#fff
+                    style ClientReq fill:#2a2a2a,stroke:#ff6b6b,stroke-width:2px,color:#fff
+                    style Ready fill:#2a2a2a,stroke:#fff,stroke-width:2px,color:#fff
+                    style Type fill:#2a2a2a,stroke:#fff,stroke-width:2px,color:#fff
+                    style MsgType fill:#2a2a2a,stroke:#fff,stroke-width:2px,color:#fff
+                    style Accept fill:#2a2a2a,stroke:#64b5f6,stroke-width:2px,color:#fff
+                    style Cleanup fill:#2a2a2a,stroke:#64b5f6,stroke-width:2px,color:#fff
+                </div>
+            </section>
+
+            <section class="diagram-slide">
+                <h2>Leader Event Loop</h2>
+                <div class="mermaid r-stretch" style="transform: scale(1); transform-origin: center">
+                    flowchart LR
+                    Start([Start Loop])
+                    Timer{Timer\nExpired?\n2s interval}
+                    Heartbeat[Send Heartbeats\nto Followers]
+                    Repair[Run Repair Tick\ntickRepair]
+                    Ready{POLL\nSockets Ready?}
+                    Type{Socket\nType?}
+                    Accept[Accept New\nConnection]
+                    MsgType{Message\nType?}
+                    Append[Append Request:\nReplicate with Quorum]
+                    Read[Read Request:\nRead from Log]
+                    Cleanup[Handle\nRetry/Success/Failure]
+
+                    Start --> Ready
+                    Timer -->|Yes| Heartbeat
+                    Heartbeat --> Repair
+                    Repair --> Start
+                    Timer -->|No| Start
+                    Ready -->|No| Timer
+                    Ready -->|Yes| Type
+                    Type -->|Listener| Accept
+                    Type -->|Client| MsgType
+                    Accept --> Cleanup
+                    MsgType -->|Append| Append
+                    MsgType -->|Read| Read
+                    Append --> Cleanup
+                    Read --> Cleanup
+                    Cleanup --> Timer
+
+                    style Start fill:#2a2a2a,stroke:#42b983,stroke-width:4px,color:#fff
+                    style Heartbeat fill:#2a2a2a,stroke:#ffa500,stroke-width:2px,color:#fff
+                    style Repair fill:#2a2a2a,stroke:#ffa500,stroke-width:2px,color:#fff
+                    style Append fill:#2a2a2a,stroke:#ff6b6b,stroke-width:3px,color:#fff
+                    style Timer fill:#2a2a2a,stroke:#fff,stroke-width:2px,color:#fff
+                    style Ready fill:#2a2a2a,stroke:#fff,stroke-width:2px,color:#fff
+                    style Type fill:#2a2a2a,stroke:#fff,stroke-width:2px,color:#fff
+                    style MsgType fill:#2a2a2a,stroke:#fff,stroke-width:2px,color:#fff
+                    style Accept fill:#2a2a2a,stroke:#64b5f6,stroke-width:2px,color:#fff
+                    style Read fill:#2a2a2a,stroke:#64b5f6,stroke-width:2px,color:#fff
+                    style Cleanup fill:#2a2a2a,stroke:#64b5f6,stroke-width:2px,color:#fff
                 </div>
             </section>
 
@@ -317,121 +381,39 @@
                     flowchart LR
                     Start([Replicating])
                     CheckLag{Follower\nLagging?}
-                    Repair[Needs Repair?]
-                    SendProbe[Send Probe Entry]
-                    ProbeResult{Probe\nAccepted?}
-                    SendStream[Stream Missing Entries\nin Batches]
+                    NeedsRepair[needs_repair]
+                    SendProbe[Send Probe\nat next_index-1]
+                    ProbeWait[repairing_probe_sent\nWait Non-blocking]
+                    ProbeResult{Probe\nMatch?}
+                    Decrement[Decrement\nnext_index]
+                    SendStream[Stream Batch\nof Entries]
+                    StreamWait[repairing_stream_sent\nWait Non-blocking]
                     StreamResult{Caught\nUp?}
 
                     Start --> CheckLag
-                    CheckLag -->|Yes| Repair
                     CheckLag -->|No| Start
-                    Repair --> SendProbe
-                    SendProbe --> ProbeResult
-                    ProbeResult -->|No: Mismatch| Repair
-                    ProbeResult -->|Yes: Match| SendStream
-                    SendStream --> StreamResult
-                    StreamResult -->|No: More Entries| SendStream
+                    CheckLag -->|Yes| NeedsRepair
+                    NeedsRepair --> SendProbe
+                    SendProbe --> ProbeWait
+                    ProbeWait --> ProbeResult
+                    ProbeResult -->|No| Decrement
+                    Decrement --> NeedsRepair
+                    ProbeResult -->|Yes| SendStream
+                    SendStream --> StreamWait
+                    StreamWait --> StreamResult
+                    StreamResult -->|No| SendStream
                     StreamResult -->|Yes| Start
 
                     style Start fill:#2a2a2a,stroke:#42b983,stroke-width:4px,color:#fff
-                    style Repair fill:#2a2a2a,stroke:#ff6b6b,stroke-width:3px,color:#fff
+                    style NeedsRepair fill:#2a2a2a,stroke:#ff6b6b,stroke-width:3px,color:#fff
                     style SendProbe fill:#2a2a2a,stroke:#ffa500,stroke-width:2px,color:#fff
+                    style ProbeWait fill:#2a2a2a,stroke:#ffa500,stroke-width:2px,color:#fff
                     style SendStream fill:#2a2a2a,stroke:#64b5f6,stroke-width:2px,color:#fff
+                    style StreamWait fill:#2a2a2a,stroke:#64b5f6,stroke-width:2px,color:#fff
                     style CheckLag fill:#2a2a2a,stroke:#fff,stroke-width:2px,color:#fff
                     style ProbeResult fill:#2a2a2a,stroke:#fff,stroke-width:2px,color:#fff
                     style StreamResult fill:#2a2a2a,stroke:#fff,stroke-width:2px,color:#fff
-                </div>
-            </section>
-
-            <section class="dense-content">
-                <h2 class="r-fit-text">Technical Achievements</h2>
-                <div class="two-col">
-                    <div class="box">
-                        <h3>Storage Engine</h3>
-                        <ul class="small">
-                            <li>Append-only log</li>
-                            <li>O(log n) sparse index</li>
-                            <li>CRC32 validation</li>
-                            <li>
-                                <strong>Memory-mapped I/O:</strong>
-                                <ul>
-                                    <li>10-100x faster index</li>
-                                    <li>5-50x faster reads</li>
-                                    <li>3-20x faster writes</li>
-                                </ul>
-                            </li>
-                        </ul>
-                    </div>
-                    <div class="box">
-                        <h3>Distributed Replication</h3>
-                        <ul class="small">
-                            <li>Raft-like consensus</li>
-                            <li>Quorum-based commits</li>
-                            <li>Non-blocking async</li>
-                            <li>Leader-driven repair</li>
-                            <li>Inline recovery</li>
-                            <li>Auto failure detection</li>
-                        </ul>
-                    </div>
-                </div>
-            </section>
-
-            <section>
-                <h2>Challenge: Head-of-Line Blocking</h2>
-                <div class="box">
-                    <p>
-                        <strong>Problem:</strong> Blocking repair stalled
-                        entire server when followers were slow
-                    </p>
-                    <p>
-                        <strong>Solution:</strong> 4-state async state
-                        machine with poll()-based readiness checks
-                    </p>
-                    <ul class="small">
-                        <li>State 1: Replicating (normal)</li>
-                        <li>State 2: Needs Repair (lag detected)</li>
-                        <li>State 3: Repairing Probe (send probe)</li>
-                        <li>State 4: Repairing Stream (catch-up)</li>
-                    </ul>
-                    <p>
-                        <strong>Result:</strong> True non-blocking - server
-                        never stalls
-                    </p>
-                </div>
-            </section>
-
-            <section>
-                <h2>More Critical Challenges</h2>
-                <div class="box">
-                    <h3>Event-Driven Architecture (Sprint 4)</h3>
-                    <div class="two-col small">
-                        <div>
-                            <strong>Before:</strong>
-                            <ul>
-                                <li>Single-client blocking</li>
-                                <li>Sequential processing</li>
-                            </ul>
-                        </div>
-                        <div>
-                            <strong>After:</strong>
-                            <ul>
-                                <li>Poll-based event loop</li>
-                                <li>Concurrent connections</li>
-                            </ul>
-                        </div>
-                    </div>
-                </div>
-                <div class="box" style="margin-top: 1em">
-                    <h3>Platform Differences (Sprint 5)</h3>
-                    <p class="small">
-                        <strong>Problem:</strong> Linux has mremap(), macOS
-                        doesn't
-                    </p>
-                    <p class="small">
-                        <strong>Solution:</strong> Platform-specific
-                        abstractions
-                    </p>
+                    style Decrement fill:#2a2a2a,stroke:#ff6b6b,stroke-width:2px,color:#fff
                 </div>
             </section>
 
