@@ -18,7 +18,6 @@ pub const ReplicationConfig = struct {
     max_lag_entries: u64,
     heartbeat_interval_ms: u64,
     repair_batch_size: u32 = 100, // Max entries to send per repair tick
-    repair_max_retries: u32 = 100, // Max probe attempts when finding common prefix
     inline_catchup_threshold: u32 = 10, // Max entries to stream inline during write (prevents head-of-line blocking for large lags)
 };
 

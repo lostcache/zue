@@ -512,7 +512,8 @@ test "replication: follower catch-up after restart" {
     // Wait for follower to start
     std.Thread.sleep(2 * std.time.ns_per_s);
 
-    // Trigger a new write to cause offset_mismatch and auto-repair
+    // Trigger a new write to cause offset_mismatch and direct jump repair
+    // (follower sends its offset in error response, leader jumps directly to it)
     const trigger_record = Record{ .key = "trigger", .value = "repair" };
     _ = try leader_client.append(trigger_record);
     std.debug.print("Triggered write to initiate repair (leader at offset 3, follower at 0)\n", .{});
@@ -523,7 +524,8 @@ test "replication: follower catch-up after restart" {
     std.debug.print("Wrote final record at offset {}\n", .{final_offset});
 
     // Poll for follower to catch up - wait for the final record
-    try waitForReplication(&cluster, 0, final_offset, allocator, 15000);
+    // Reduced timeout since repair is now O(1) via direct offset jumping
+    try waitForReplication(&cluster, 0, final_offset, allocator, 8000);
 
     // Verify follower has all records
     {
@@ -609,15 +611,16 @@ test "replication: follower auto-recovery on offset_mismatch" {
     // Wait for follower to start
     std.Thread.sleep(2 * std.time.ns_per_s);
 
-    // Now write a NEW entry that will trigger offset_mismatch
+    // Now write a NEW entry that will trigger offset_mismatch and direct jump repair
     const record5 = Record{ .key = "trigger", .value = "offset_mismatch" };
     const offset5 = try leader_client.append(record5);
     try testing.expectEqual(@as(u64, 4), offset5);
 
-    std.debug.print("Wrote new record (offset 4) - should trigger offset_mismatch and auto-repair\n", .{});
+    std.debug.print("Wrote new record (offset 4) - should trigger offset_mismatch, follower reports offset, leader jumps to it\n", .{});
 
     // Poll for follower to catch up - wait for the trigger entry
-    try waitForReplication(&cluster, 0, offset5, allocator, 10000);
+    // Reduced timeout since repair uses direct offset jumping (no linear probing)
+    try waitForReplication(&cluster, 0, offset5, allocator, 6000);
 
     // Verify follower 0 has ALL records including the trigger entry
     {
@@ -751,11 +754,11 @@ test "replication: follower lag detection with max_lag_entries" {
     // Wait for follower to start
     std.Thread.sleep(2 * std.time.ns_per_s);
 
-    // Trigger a write to initiate offset_mismatch and repair
+    // Trigger a write to initiate offset_mismatch and direct jump repair
     const trigger_record = Record{ .key = "trigger", .value = "repair-start" };
     const trigger_offset = try leader_client.append(trigger_record);
 
-    std.debug.print("Triggered write at offset {d} - should initiate repair\n", .{trigger_offset});
+    std.debug.print("Triggered write at offset {d} - should initiate direct jump repair (no probing)\n", .{trigger_offset});
 
     // Write final record to verify follower is now in-sync
     const final_record = Record{ .key = "final", .value = "in-sync-check" };
@@ -764,7 +767,9 @@ test "replication: follower lag detection with max_lag_entries" {
     std.debug.print("Wrote final record at offset {d}\n", .{final_offset});
 
     // Poll for follower to catch up - wait for the final record
-    try waitForReplication(&cluster, 0, final_offset, allocator, 20000);
+    // Significantly reduced timeout: with direct offset jumping, even 20-entry lag
+    // is caught up quickly (no linear probing needed)
+    try waitForReplication(&cluster, 0, final_offset, allocator, 10000);
 
     // Verify follower has the final record (proving it caught up)
     {
