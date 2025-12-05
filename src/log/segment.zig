@@ -264,7 +264,7 @@ pub const Segment = struct {
 
         const record_pos = self.log_file_size;
         try self.log_file.seekTo(record_pos);
-        try OnDiskLog.OnDiskLog.serialize(self.config.log_config, record, self.log_file);
+        try OnDiskLog.OnDiskLog.serializeWrite(self.config.log_config, record, self.log_file);
         self.log_file_size += record_size;
         self.bytes_since_last_index += record_size;
 

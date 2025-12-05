@@ -9,7 +9,6 @@ const std = @import("std");
 /// | Key          | `[]const u8` | configurable |
 /// | Value Length | `i32`        | 4            |
 /// | Value        | `[]const u8` | configurable |
-
 const CRC = @sizeOf(u32);
 const TIMESTAMP = @sizeOf(i64);
 const KEY_LEN_HOLDER = @sizeOf(i32);
@@ -79,7 +78,7 @@ pub const OnDiskLog = struct {
         return crc_hasher.final();
     }
 
-    fn writeSerialized(config: OnDiskLogConfig, writer: anytype, crc: u32, timestamp: i64, key_len: i32, value_len: i32, record: Record) !void {
+    fn validateWrite(config: OnDiskLogConfig, writer: anytype, crc: u32, timestamp: i64, key_len: i32, value_len: i32, record: Record) !void {
         var buf: [4]u8 = undefined;
         std.mem.writeInt(u32, &buf, crc, .little);
         try writer.writeAll(&buf);
@@ -107,7 +106,7 @@ pub const OnDiskLog = struct {
         try writer.writeAll(record.value);
     }
 
-    pub fn serialize(config: OnDiskLogConfig, record: Record, writer: anytype) !void {
+    pub fn serializeWrite(config: OnDiskLogConfig, record: Record, writer: anytype) !void {
         const timestamp: i64 = std.time.milliTimestamp();
         const key_len: i32 = if (record.key) |k| @intCast(k.len) else 0;
         std.debug.assert(key_len >= config.key_min_size_bytes);
@@ -119,7 +118,7 @@ pub const OnDiskLog = struct {
 
         const crc = computeCRC(config, record, timestamp, key_len, value_len);
 
-        try writeSerialized(config, writer, crc, timestamp, key_len, value_len, record);
+        try validateWrite(config, writer, crc, timestamp, key_len, value_len, record);
     }
 
     fn verifyCRC(config: OnDiskLogConfig, crc: u32, timestamp: i64, record: Record) error{CRCMismatch}!void {
@@ -206,7 +205,7 @@ test "OnDiskLog.serialize" {
     defer buffer.deinit(t_alloc);
 
     const writer = buffer.writer(t_alloc);
-    try OnDiskLog.serialize(config, record, writer);
+    try OnDiskLog.serializeWrite(config, record, writer);
 
     // Expected size: CRC(4) + Timestamp(8) + KeyLen(4) + Key(3) + ValueLen(4) + Value(5) = 28
     try std.testing.expectEqual(@as(usize, 28), buffer.items.len);
@@ -254,7 +253,7 @@ test "OnDiskLog.serialize and OnDiskLog.deserialize" {
     {
         // Test with key
         const record_with_key = Record{ .key = "my-key", .value = "my-value" };
-        try OnDiskLog.serialize(config, record_with_key, buffer.writer(allocator));
+        try OnDiskLog.serializeWrite(config, record_with_key, buffer.writer(allocator));
 
         var stream = std.io.fixedBufferStream(buffer.items);
         const reader = stream.reader();
@@ -270,7 +269,7 @@ test "OnDiskLog.serialize and OnDiskLog.deserialize" {
     {
         // Test without key
         const record_no_key = Record{ .key = null, .value = "value-only" };
-        try OnDiskLog.serialize(config, record_no_key, buffer.writer(allocator));
+        try OnDiskLog.serializeWrite(config, record_no_key, buffer.writer(allocator));
 
         var stream_no_key = std.io.fixedBufferStream(buffer.items);
         const reader_no_key = stream_no_key.reader();
@@ -292,7 +291,7 @@ test "OnDiskLog.deserialize with CRC mismatch" {
     defer buffer.deinit(allocator);
 
     const record = Record{ .key = "key", .value = "value" };
-    try OnDiskLog.serialize(config, record, buffer.writer(allocator));
+    try OnDiskLog.serializeWrite(config, record, buffer.writer(allocator));
 
     // Tamper with the buffer. Flip a bit in the value.
     buffer.items[25] ^= 0x01;

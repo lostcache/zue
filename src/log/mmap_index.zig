@@ -2,42 +2,16 @@ const std = @import("std");
 const mmap = @import("mmap.zig");
 const log_index = @import("log_index.zig");
 
-const INDEX_SIZE_BYTES = log_index.INDEX_SIZE_BYTES;
-const Index = log_index.Index;
-const OnDiskIndexConfig = log_index.OnDiskIndexConfig;
-
-/// Memory-mapped index file for fast random access
-/// Uses mmap instead of seek+read for significantly better performance
 pub const MmapIndex = struct {
     mmap_file: mmap.MmapFile,
-    config: OnDiskIndexConfig,
+    config: log_index.OnDiskIndexConfig,
     current_size: u64,
 
-    /// Create a new memory-mapped index file
-    pub fn create(file_path: []const u8, config: OnDiskIndexConfig) !MmapIndex {
-        // Start with space for initial indices
-        const initial_size = INDEX_SIZE_BYTES * 16; // Pre-allocate for 16 entries
+    pub fn create(file_path: []const u8, config: log_index.OnDiskIndexConfig) !MmapIndex {
+        // TODO: use constant values or add to configurables
+        const initial_size = log_index.INDEX_SIZE_BYTES * 16; // Start with space for 16 entries
         const mmap_file = try mmap.MmapFile.create(file_path, initial_size);
 
-        return MmapIndex{
-            .mmap_file = mmap_file,
-            .config = config,
-            .current_size = 0, // No entries yet
-        };
-    }
-
-    /// Open an existing memory-mapped index file
-    /// The index is treated as a cache - it will be rebuilt from the log on open
-    /// This ensures the index is always consistent with the source of truth (the log)
-    pub fn open(file_path: []const u8, config: OnDiskIndexConfig) !MmapIndex {
-        const file = try std.fs.openFileAbsolute(file_path, .{ .mode = .read_write });
-        const stat = try file.stat();
-        const file_size = stat.size;
-        file.close();
-
-        const mmap_file = try mmap.MmapFile.openWrite(file_path, @max(file_size, INDEX_SIZE_BYTES * 16));
-
-        // Index starts empty - it will be rebuilt from the log by the segment
         return MmapIndex{
             .mmap_file = mmap_file,
             .config = config,
@@ -45,51 +19,59 @@ pub const MmapIndex = struct {
         };
     }
 
-    /// Close and unmap the index file
+    pub fn open(file_path: []const u8, config: log_index.OnDiskIndexConfig) !MmapIndex {
+        const file = try std.fs.openFileAbsolute(file_path, .{ .mode = .read_write });
+        const stat = try file.stat();
+        const file_size = stat.size;
+        file.close();
+
+        const mmap_file = try mmap.MmapFile.openWrite(file_path, @max(file_size, log_index.INDEX_SIZE_BYTES * 16));
+
+        return MmapIndex{
+            .mmap_file = mmap_file,
+            .config = config,
+            .current_size = 0,
+        };
+    }
+
     pub fn close(self: *MmapIndex) void {
         self.mmap_file.close();
     }
 
-    /// Add a new index entry
-    /// Much faster than traditional file IO as we write directly to mapped memory
-    pub fn add(self: *MmapIndex, relative_offset: u32, pos: u32) !Index {
-        if (self.current_size + INDEX_SIZE_BYTES > self.config.index_file_max_size_bytes) {
+    pub fn add(self: *MmapIndex, relative_offset: u32, pos: u32) !log_index.Index {
+        if (self.current_size + log_index.INDEX_SIZE_BYTES > self.config.index_file_max_size_bytes) {
             return error.IndexFileFull;
         }
 
-        const index = Index.create(relative_offset, pos);
+        const index = log_index.Index.create(relative_offset, pos);
 
-        // Extend mapping if needed
-        if (self.current_size + INDEX_SIZE_BYTES > self.mmap_file.len()) {
-            const new_size = self.mmap_file.len() + (INDEX_SIZE_BYTES * 16); // Grow by 16 entries
+        if (self.current_size + log_index.INDEX_SIZE_BYTES > self.mmap_file.len()) {
+            // TODO: use constant values or add to configurables
+            const new_size = self.mmap_file.len() + (log_index.INDEX_SIZE_BYTES * 16); // Grow by 16 entries
             const capped_size = @min(new_size, self.config.index_file_max_size_bytes);
             try self.mmap_file.extend(capped_size);
         }
 
-        // Write directly to mapped memory - no syscall overhead!
         const slice = self.mmap_file.asSlice();
         const offset = self.current_size;
 
         std.mem.writeInt(u32, slice[offset..][0..4], index.relative_offset, .little);
-        std.mem.writeInt(u32, slice[offset + 4..][0..4], index.pos, .little);
-        std.mem.writeInt(u32, slice[offset + 8..][0..4], index.crc32, .little);
+        std.mem.writeInt(u32, slice[offset + 4 ..][0..4], index.pos, .little);
+        std.mem.writeInt(u32, slice[offset + 8 ..][0..4], index.crc32, .little);
 
-        self.current_size += INDEX_SIZE_BYTES;
+        self.current_size += log_index.INDEX_SIZE_BYTES;
 
         return index;
     }
 
-    /// Lookup an index entry using binary search
-    /// Much faster than traditional file IO as we read directly from mapped memory
-    pub fn lookup(self: *const MmapIndex, seek_offset: u32) !Index {
-        const no_of_indices = self.current_size / INDEX_SIZE_BYTES;
+    pub fn lookup(self: *const MmapIndex, seek_offset: u32) !log_index.Index {
+        const no_of_indices = self.current_size / log_index.INDEX_SIZE_BYTES;
         if (no_of_indices == 0) {
             return error.IndexOutOfBounds;
         }
 
         const slice = self.mmap_file.asConstSlice();
 
-        // Read first index to check bounds
         const first_index = self.readIndexAt(slice, 0);
         if (!first_index.validate()) {
             return error.IndexEntryCorrupted;
@@ -98,8 +80,7 @@ pub const MmapIndex = struct {
             return error.IndexOutOfBounds;
         }
 
-        // Binary search through mapped memory - very fast!
-        var nearest_index: ?Index = null;
+        var nearest_index: ?log_index.Index = null;
         var l: u64 = 0;
         var r: u64 = no_of_indices - 1;
 
@@ -124,33 +105,27 @@ pub const MmapIndex = struct {
         return nearest_index.?;
     }
 
-    /// Read an index entry at a specific index position
-    /// Direct memory access - no syscalls!
-    fn readIndexAt(_: *const MmapIndex, slice: []const u8, index_pos: u64) Index {
-        const offset = index_pos * INDEX_SIZE_BYTES;
-        return Index{
+    fn readIndexAt(_: *const MmapIndex, slice: []const u8, index_pos: u64) log_index.Index {
+        const offset = index_pos * log_index.INDEX_SIZE_BYTES;
+        return log_index.Index{
             .relative_offset = std.mem.readInt(u32, slice[offset..][0..4], .little),
-            .pos = std.mem.readInt(u32, slice[offset + 4..][0..4], .little),
-            .crc32 = std.mem.readInt(u32, slice[offset + 8..][0..4], .little),
+            .pos = std.mem.readInt(u32, slice[offset + 4 ..][0..4], .little),
+            .crc32 = std.mem.readInt(u32, slice[offset + 8 ..][0..4], .little),
         };
     }
 
-    /// Check if the index file is full
     pub fn isFull(self: *const MmapIndex) bool {
-        return self.current_size + INDEX_SIZE_BYTES > self.config.index_file_max_size_bytes;
+        return self.current_size + log_index.INDEX_SIZE_BYTES > self.config.index_file_max_size_bytes;
     }
 
-    /// Get the number of entries in the index
     pub fn getEntryCount(self: *const MmapIndex) u64 {
-        return self.current_size / INDEX_SIZE_BYTES;
+        return self.current_size / log_index.INDEX_SIZE_BYTES;
     }
 
-    /// Sync changes to disk
     pub fn sync(self: *MmapIndex) !void {
         try self.mmap_file.sync();
     }
 
-    /// Async sync changes to disk
     pub fn syncAsync(self: *MmapIndex) !void {
         try self.mmap_file.syncAsync();
     }
@@ -164,7 +139,7 @@ test "MmapIndex: create and add entries" {
     const test_path = "/tmp/test_mmap_index_create.index";
     defer std.fs.deleteFileAbsolute(test_path) catch {};
 
-    const config = OnDiskIndexConfig{
+    const config = log_index.OnDiskIndexConfig{
         .index_file_max_size_bytes = 1024,
         .bytes_per_index = 256,
     };
@@ -188,7 +163,7 @@ test "MmapIndex: lookup exact match" {
     const test_path = "/tmp/test_mmap_index_lookup.index";
     defer std.fs.deleteFileAbsolute(test_path) catch {};
 
-    const config = OnDiskIndexConfig{
+    const config = log_index.OnDiskIndexConfig{
         .index_file_max_size_bytes = 1024,
         .bytes_per_index = 256,
     };
@@ -209,7 +184,7 @@ test "MmapIndex: lookup nearest (less than or equal)" {
     const test_path = "/tmp/test_mmap_index_lookup_le.index";
     defer std.fs.deleteFileAbsolute(test_path) catch {};
 
-    const config = OnDiskIndexConfig{
+    const config = log_index.OnDiskIndexConfig{
         .index_file_max_size_bytes = 1024,
         .bytes_per_index = 256,
     };
@@ -231,7 +206,7 @@ test "MmapIndex: index treated as cache (rebuilds on open)" {
     const test_path = "/tmp/test_mmap_index_persistence.index";
     defer std.fs.deleteFileAbsolute(test_path) catch {};
 
-    const config = OnDiskIndexConfig{
+    const config = log_index.OnDiskIndexConfig{
         .index_file_max_size_bytes = 1024,
         .bytes_per_index = 256,
     };
@@ -271,8 +246,8 @@ test "MmapIndex: index file full" {
     const test_path = "/tmp/test_mmap_index_full.index";
     defer std.fs.deleteFileAbsolute(test_path) catch {};
 
-    const config = OnDiskIndexConfig{
-        .index_file_max_size_bytes = INDEX_SIZE_BYTES * 2,
+    const config = log_index.OnDiskIndexConfig{
+        .index_file_max_size_bytes = log_index.INDEX_SIZE_BYTES * 2,
         .bytes_per_index = 256,
     };
 
@@ -292,7 +267,7 @@ test "MmapIndex: empty index lookup returns error" {
     const test_path = "/tmp/test_mmap_index_empty.index";
     defer std.fs.deleteFileAbsolute(test_path) catch {};
 
-    const config = OnDiskIndexConfig{};
+    const config = log_index.OnDiskIndexConfig{};
     var index = try MmapIndex.create(test_path, config);
     defer index.close();
 
@@ -303,7 +278,7 @@ test "MmapIndex: many entries (stress test)" {
     const test_path = "/tmp/test_mmap_index_stress.index";
     defer std.fs.deleteFileAbsolute(test_path) catch {};
 
-    const config = OnDiskIndexConfig{
+    const config = log_index.OnDiskIndexConfig{
         .index_file_max_size_bytes = 1024 * 100,
         .bytes_per_index = 256,
     };

@@ -3,23 +3,15 @@ const mmap = @import("mmap.zig");
 const record = @import("record.zig");
 const posix = std.posix;
 
-const Record = record.Record;
-const OnDiskLogConfig = record.OnDiskLogConfig;
-
-/// Memory-mapped log file for efficient record reading
-/// Uses mmap to avoid system calls for each read operation
 pub const MmapLogReader = struct {
     mmap_file: mmap.MmapFile,
-    config: OnDiskLogConfig,
+    config: record.OnDiskLogConfig,
     actual_size: u64,
 
-    /// Open a log file with memory mapping for reading
-    /// Scans the log file to find the actual end of valid data by validating checksums
-    pub fn open(file_path: []const u8, config: OnDiskLogConfig, allocator: std.mem.Allocator) !MmapLogReader {
+    pub fn open(file_path: []const u8, config: record.OnDiskLogConfig, allocator: std.mem.Allocator) !MmapLogReader {
         const mmap_file = try mmap.MmapFile.openRead(file_path);
         errdefer mmap_file.close();
 
-        // Scan the log file to find the actual end of valid data
         const actual_size = scanForValidEnd(mmap_file, config, allocator);
 
         return MmapLogReader{
@@ -29,50 +21,38 @@ pub const MmapLogReader = struct {
         };
     }
 
-    /// Scan through the log file to find where valid data ends
-    /// Returns the position after the last valid record
-    fn scanForValidEnd(mmap_file: mmap.MmapFile, config: OnDiskLogConfig, allocator: std.mem.Allocator) u64 {
+    fn scanForValidEnd(mmap_file: mmap.MmapFile, config: record.OnDiskLogConfig, allocator: std.mem.Allocator) u64 {
         const slice = mmap_file.asConstSlice();
         var pos: u64 = 0;
 
-        // Use arena allocator for temporary allocations during scan
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
         const temp_alloc = arena.allocator();
 
         while (pos < slice.len) {
-            // Try to read the record at this position
             var stream = std.io.fixedBufferStream(slice[pos..]);
             const reader = stream.reader();
 
-            // Try to deserialize and validate the record
             const rec = record.OnDiskLog.deserialize(config, reader, temp_alloc) catch {
-                // Invalid record or incomplete data - this is where valid data ends
                 break;
             };
 
-            // Calculate record size to advance position
             const rec_size = record.OnDiskLog.serializedSize(config, rec);
             pos += rec_size;
 
-            // Reset arena for next iteration to avoid unbounded memory growth
             _ = arena.reset(.retain_capacity);
         }
 
         return pos;
     }
 
-    /// Close and unmap the log file
     pub fn close(self: *MmapLogReader) void {
         self.mmap_file.close();
     }
 
-    /// Deserialize a record at a specific file position
-    /// Reads directly from mapped memory - no syscalls!
-    pub fn deserializeAt(self: *const MmapLogReader, pos: u64, allocator: std.mem.Allocator) !Record {
+    pub fn deserializeAt(self: *const MmapLogReader, pos: u64, allocator: std.mem.Allocator) !record.Record {
         const slice = self.mmap_file.asConstSlice();
 
-        // Check against actual data size, not file size
         if (pos >= self.actual_size) {
             return error.EndOfStream;
         }
@@ -87,12 +67,9 @@ pub const MmapLogReader = struct {
         return try record.OnDiskLog.deserialize(self.config, reader, allocator);
     }
 
-    /// Calculate the size of a record at a specific position without allocating
-    /// Useful for skipping records efficiently
     pub fn recordSizeAt(self: *const MmapLogReader, pos: u64) !usize {
         const slice = self.mmap_file.asConstSlice();
 
-        // Check against actual data size first
         if (pos >= self.actual_size) {
             return error.EndOfStream;
         }
@@ -101,7 +78,7 @@ pub const MmapLogReader = struct {
             return error.EndOfStream;
         }
 
-        // Need at least CRC + Timestamp + KeyLen fields (16 bytes)
+        // TODO: replace with constants
         const min_header = 4 + 8 + 4; // CRC + Timestamp + KeyLen
         if (pos + min_header > self.actual_size) {
             return error.IncompleteRecord;
@@ -111,16 +88,18 @@ pub const MmapLogReader = struct {
             return error.IncompleteRecord;
         }
 
-        // Read key length (at offset 12)
+        // TODO: replace with constants
         const key_len = std.mem.readInt(i32, slice[pos + 12 ..][0..4], .little);
 
         if (key_len < 0) {
             return error.InvalidRecordSize;
         }
 
+        // TODO: replace with constants
         // Value length is at offset: 16 (CRC+TS+KeyLen) + key_len
         const value_len_offset = 16 + @as(usize, @intCast(key_len));
 
+        // TODO: replace with constants
         // Check we can read value length
         if (pos + value_len_offset + 4 > self.actual_size) {
             return error.IncompleteRecord;
@@ -136,32 +115,29 @@ pub const MmapLogReader = struct {
             return error.InvalidRecordSize;
         }
 
+        // TODO: replace with constants
         // Total size: 16 (up to KeyLen) + key_len + 4 (ValueLen) + value_len
         const total_size = 16 + @as(usize, @intCast(key_len)) + 4 + @as(usize, @intCast(value_len));
         return total_size;
     }
 
-    /// Get the actual data size (may be less than file size due to pre-allocation)
     pub fn size(self: *const MmapLogReader) usize {
         return self.actual_size;
     }
 };
 
-/// Memory-mapped log file for efficient record writing
-/// Writes go directly to mapped memory - OS handles flushing
 pub const MmapLogWriter = struct {
     mmap_file: mmap.MmapFile,
-    config: OnDiskLogConfig,
+    config: record.OnDiskLogConfig,
     current_pos: u64,
     file_path: []const u8,
     allocator: std.mem.Allocator,
 
-    /// Create a new memory-mapped log file for writing
-    pub fn create(file_path: []const u8, config: OnDiskLogConfig, allocator: std.mem.Allocator) !MmapLogWriter {
-        // Duplicate the path so we can use it later for truncation
+    pub fn create(file_path: []const u8, config: record.OnDiskLogConfig, allocator: std.mem.Allocator) !MmapLogWriter {
         const path_copy = try allocator.dupe(u8, file_path);
         errdefer allocator.free(path_copy);
 
+        // TODO: replace with constants
         // Pre-allocate space for initial records (1MB)
         const initial_size = 1024 * 1024;
         const mmap_file = try mmap.MmapFile.create(file_path, initial_size);
@@ -175,13 +151,10 @@ pub const MmapLogWriter = struct {
         };
     }
 
-    /// Open an existing log file for appending
-    /// Scans the log file to find the actual end of valid data
-    pub fn open(file_path: []const u8, config: OnDiskLogConfig, allocator: std.mem.Allocator) !MmapLogWriter {
+    pub fn open(file_path: []const u8, config: record.OnDiskLogConfig, allocator: std.mem.Allocator) !MmapLogWriter {
         const path_copy = try allocator.dupe(u8, file_path);
         errdefer allocator.free(path_copy);
 
-        // First, get the file size to know minimum mapping size
         const file_size = blk: {
             const file = try std.fs.openFileAbsolute(file_path, .{});
             defer file.close();
@@ -189,12 +162,12 @@ pub const MmapLogWriter = struct {
             break :blk stat.size;
         };
 
+        // TODO: replace with constants
         // Open with minimum size
         const min_size = @max(file_size, 1024 * 1024);
         const mmap_file = try mmap.MmapFile.openWrite(file_path, min_size);
         errdefer mmap_file.close();
 
-        // Scan to find actual end of valid data
         const actual_size = scanForValidEndWriter(mmap_file, config, allocator);
 
         return MmapLogWriter{
@@ -206,57 +179,45 @@ pub const MmapLogWriter = struct {
         };
     }
 
-    /// Scan through the log file to find where valid data ends (for writer)
-    /// Returns the position after the last valid record
-    fn scanForValidEndWriter(mmap_file: mmap.MmapFile, config: OnDiskLogConfig, allocator: std.mem.Allocator) u64 {
+    fn scanForValidEndWriter(mmap_file: mmap.MmapFile, config: record.OnDiskLogConfig, allocator: std.mem.Allocator) u64 {
         const slice = mmap_file.asConstSlice();
         var pos: u64 = 0;
 
-        // Use arena allocator for temporary allocations during scan
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
         const temp_alloc = arena.allocator();
 
         while (pos < slice.len) {
-            // Try to read the record at this position
             var stream = std.io.fixedBufferStream(slice[pos..]);
             const reader = stream.reader();
 
-            // Try to deserialize and validate the record
             const rec = record.OnDiskLog.deserialize(config, reader, temp_alloc) catch {
-                // Invalid record or incomplete data - this is where valid data ends
                 break;
             };
 
-            // Calculate record size to advance position
             const rec_size = record.OnDiskLog.serializedSize(config, rec);
             pos += rec_size;
 
-            // Reset arena for next iteration to avoid unbounded memory growth
             _ = arena.reset(.retain_capacity);
         }
 
         return pos;
     }
 
-    /// Close and unmap the log file
+    // TODO: handle errors
     pub fn close(self: *MmapLogWriter) void {
         defer self.allocator.free(self.file_path);
 
-        // Sync all changes to disk
         self.mmap_file.sync() catch {};
 
-        // Close (unmap and close file)
         self.mmap_file.close();
     }
 
-    /// Serialize and append a record to the log
-    /// Writes directly to mapped memory - very fast!
-    pub fn append(self: *MmapLogWriter, rec: Record) !usize {
+    pub fn append(self: *MmapLogWriter, rec: record.Record) !usize {
         const rec_size = record.OnDiskLog.serializedSize(self.config, rec);
 
-        // Check if we need to extend the mapping
         if (self.current_pos + rec_size > self.mmap_file.len()) {
+            // TODO: replace with constants
             // Extend by 1MB or the record size, whichever is larger
             const extension = @max(1024 * 1024, rec_size);
             const new_size = self.mmap_file.len() + extension;
@@ -268,12 +229,11 @@ pub const MmapLogWriter = struct {
             try self.mmap_file.extend(new_size);
         }
 
-        // Write directly to mapped memory
         const slice = self.mmap_file.asSlice();
         var stream = std.io.fixedBufferStream(slice[self.current_pos..]);
         const writer = stream.writer();
 
-        try record.OnDiskLog.serialize(self.config, rec, writer);
+        try record.OnDiskLog.serializeWrite(self.config, rec, writer);
 
         const written_pos = self.current_pos;
         self.current_pos += rec_size;
@@ -281,17 +241,14 @@ pub const MmapLogWriter = struct {
         return written_pos;
     }
 
-    /// Get current position (size of written data)
     pub fn getCurrentPos(self: *const MmapLogWriter) u64 {
         return self.current_pos;
     }
 
-    /// Sync changes to disk
     pub fn sync(self: *MmapLogWriter) !void {
         try self.mmap_file.sync();
     }
 
-    /// Async sync changes to disk
     pub fn syncAsync(self: *MmapLogWriter) !void {
         try self.mmap_file.syncAsync();
     }
@@ -305,11 +262,11 @@ test "MmapLogWriter: create and append record" {
     const test_path = "/tmp/test_mmap_log_write.log";
     defer std.fs.deleteFileAbsolute(test_path) catch {};
 
-    const config = OnDiskLogConfig{};
+    const config = record.OnDiskLogConfig{};
     var writer = try MmapLogWriter.create(test_path, config, std.testing.allocator);
     defer writer.close();
 
-    const rec = Record{ .key = "test-key", .value = "test-value" };
+    const rec = record.Record{ .key = "test-key", .value = "test-value" };
     const pos = try writer.append(rec);
 
     try std.testing.expectEqual(@as(usize, 0), pos);
@@ -322,13 +279,13 @@ test "MmapLogWriter: multiple appends" {
     const test_path = "/tmp/test_mmap_log_multi_write.log";
     defer std.fs.deleteFileAbsolute(test_path) catch {};
 
-    const config = OnDiskLogConfig{};
+    const config = record.OnDiskLogConfig{};
     var writer = try MmapLogWriter.create(test_path, config, std.testing.allocator);
     defer writer.close();
 
-    const rec1 = Record{ .key = "key1", .value = "value1" };
-    const rec2 = Record{ .key = "key2", .value = "value2" };
-    const rec3 = Record{ .key = null, .value = "value3" };
+    const rec1 = record.Record{ .key = "key1", .value = "value1" };
+    const rec2 = record.Record{ .key = "key2", .value = "value2" };
+    const rec3 = record.Record{ .key = null, .value = "value3" };
 
     const pos1 = try writer.append(rec1);
     const pos2 = try writer.append(rec2);
@@ -345,7 +302,7 @@ test "MmapLogReader: read records" {
     const test_path = "/tmp/test_mmap_log_read.log";
     defer std.fs.deleteFileAbsolute(test_path) catch {};
 
-    const config = OnDiskLogConfig{};
+    const config = record.OnDiskLogConfig{};
 
     // Write some records
     var positions: [3]usize = undefined;
@@ -353,9 +310,9 @@ test "MmapLogReader: read records" {
         var writer = try MmapLogWriter.create(test_path, config, std.testing.allocator);
         defer writer.close();
 
-        const rec1 = Record{ .key = "key1", .value = "value1" };
-        const rec2 = Record{ .key = "key2", .value = "value2" };
-        const rec3 = Record{ .key = null, .value = "value3" };
+        const rec1 = record.Record{ .key = "key1", .value = "value1" };
+        const rec2 = record.Record{ .key = "key2", .value = "value2" };
+        const rec3 = record.Record{ .key = null, .value = "value3" };
 
         positions[0] = try writer.append(rec1);
         positions[1] = try writer.append(rec2);
@@ -399,14 +356,14 @@ test "MmapLogReader: recordSizeAt" {
     const test_path = "/tmp/test_mmap_log_size.log";
     defer std.fs.deleteFileAbsolute(test_path) catch {};
 
-    const config = OnDiskLogConfig{};
+    const config = record.OnDiskLogConfig{};
 
     var pos: usize = 0;
     {
         var writer = try MmapLogWriter.create(test_path, config, std.testing.allocator);
         defer writer.close();
 
-        const rec = Record{ .key = "key", .value = "value" };
+        const rec = record.Record{ .key = "key", .value = "value" };
         pos = try writer.append(rec);
         try writer.sync();
     }
@@ -416,7 +373,7 @@ test "MmapLogReader: recordSizeAt" {
         defer reader.close();
 
         const size = try reader.recordSizeAt(pos);
-        const expected_size = record.OnDiskLog.serializedSize(config, Record{ .key = "key", .value = "value" });
+        const expected_size = record.OnDiskLog.serializedSize(config, record.Record{ .key = "key", .value = "value" });
         try std.testing.expectEqual(expected_size, size);
     }
 }
@@ -425,7 +382,7 @@ test "MmapLogWriter: auto-extend on large write" {
     const test_path = "/tmp/test_mmap_log_extend.log";
     defer std.fs.deleteFileAbsolute(test_path) catch {};
 
-    const config = OnDiskLogConfig{
+    const config = record.OnDiskLogConfig{
         .value_max_size_bytes = 2 * 1024 * 1024, // Allow 2MB values
     };
     var writer = try MmapLogWriter.create(test_path, config, std.testing.allocator);
@@ -435,7 +392,7 @@ test "MmapLogWriter: auto-extend on large write" {
     var large_value: [2 * 1024 * 1024]u8 = undefined;
     @memset(&large_value, 'X');
 
-    const rec = Record{ .key = "large", .value = &large_value };
+    const rec = record.Record{ .key = "large", .value = &large_value };
     _ = try writer.append(rec);
 
     try std.testing.expect(writer.getCurrentPos() > 2 * 1024 * 1024);
@@ -446,7 +403,7 @@ test "MmapLogWriter and Reader: persistence" {
     const test_path = "/tmp/test_mmap_log_persist.log";
     defer std.fs.deleteFileAbsolute(test_path) catch {};
 
-    const config = OnDiskLogConfig{};
+    const config = record.OnDiskLogConfig{};
 
     // Write
     {
@@ -460,7 +417,7 @@ test "MmapLogWriter and Reader: persistence" {
             const value = try std.fmt.allocPrint(std.testing.allocator, "value-{d}", .{i});
             defer std.testing.allocator.free(value);
 
-            const rec = Record{ .key = key, .value = value };
+            const rec = record.Record{ .key = key, .value = value };
             _ = try writer.append(rec);
         }
 

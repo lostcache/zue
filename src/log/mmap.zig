@@ -2,15 +2,11 @@ const std = @import("std");
 const builtin = @import("builtin");
 const posix = std.posix;
 
-/// Memory-mapped file wrapper for efficient file IO
-/// Supports both read-only and read-write memory mapping
 pub const MmapFile = struct {
     file: std.fs.File,
     mapped_memory: []align(std.heap.page_size_min) u8,
     writable: bool,
 
-    /// Open a file with memory mapping for reading
-    /// The entire file is mapped into memory
     pub fn openRead(file_path: []const u8) !MmapFile {
         const file = try std.fs.openFileAbsolute(file_path, .{ .mode = .read_only });
         errdefer file.close();
@@ -43,8 +39,6 @@ pub const MmapFile = struct {
         };
     }
 
-    /// Open a file with memory mapping for reading and writing
-    /// If the file doesn't exist or is smaller than min_size, it will be extended
     pub fn openWrite(file_path: []const u8, min_size: usize) !MmapFile {
         const file = try std.fs.openFileAbsolute(file_path, .{ .mode = .read_write });
         errdefer file.close();
@@ -59,7 +53,6 @@ pub const MmapFile = struct {
         }
 
         if (file_size == 0) {
-            // Empty file - return with empty mapping
             return MmapFile{
                 .file = file,
                 .mapped_memory = &[_]u8{},
@@ -83,13 +76,11 @@ pub const MmapFile = struct {
         };
     }
 
-    /// Create a new file with memory mapping for writing
     pub fn create(file_path: []const u8, initial_size: usize) !MmapFile {
         const file = try std.fs.createFileAbsolute(file_path, .{ .truncate = true, .read = true });
         errdefer file.close();
 
         if (initial_size == 0) {
-            // Empty file - return with empty mapping
             return MmapFile{
                 .file = file,
                 .mapped_memory = &[_]u8{},
@@ -97,7 +88,6 @@ pub const MmapFile = struct {
             };
         }
 
-        // Set file size
         try file.setEndPos(initial_size);
 
         const mapped_memory = try posix.mmap(
@@ -116,34 +106,28 @@ pub const MmapFile = struct {
         };
     }
 
-    /// Get a slice of the mapped memory
     pub fn asSlice(self: *const MmapFile) []u8 {
         return @constCast(self.mapped_memory);
     }
 
-    /// Get a const slice of the mapped memory
     pub fn asConstSlice(self: *const MmapFile) []const u8 {
         return self.mapped_memory;
     }
 
-    /// Get the length of the mapped memory
     pub fn len(self: *const MmapFile) usize {
         return self.mapped_memory.len;
     }
 
-    /// Sync changes to disk (for writable mappings)
     pub fn sync(self: *MmapFile) !void {
         if (!self.writable or self.mapped_memory.len == 0) return;
         try posix.msync(self.mapped_memory, posix.MSF.SYNC);
     }
 
-    /// Sync changes to disk asynchronously
     pub fn syncAsync(self: *MmapFile) !void {
         if (!self.writable or self.mapped_memory.len == 0) return;
         try posix.msync(self.mapped_memory, posix.MSF.ASYNC);
     }
 
-    /// Unmap and close the file
     pub fn close(self: *MmapFile) void {
         if (self.mapped_memory.len > 0) {
             posix.munmap(self.mapped_memory);
@@ -161,12 +145,9 @@ pub const MmapFile = struct {
         if (new_size <= self.mapped_memory.len) return;
         if (!self.writable) return error.NotWritable;
 
-        // Extend file first
         try self.file.setEndPos(new_size);
 
         if (builtin.os.tag == .linux) {
-            // Linux: Use mremap for efficient extension
-            // mremap can often extend the mapping in-place or move it efficiently
             const old_size = self.mapped_memory.len;
 
             if (old_size == 0) {
@@ -180,8 +161,6 @@ pub const MmapFile = struct {
                     0,
                 );
             } else {
-                // Use mremap syscall directly (avoids libc dependency)
-                // MREMAP.MAYMOVE allows the kernel to move the mapping if it can't extend in-place
                 const linux = std.os.linux;
 
                 const new_addr = linux.mremap(
@@ -192,7 +171,6 @@ pub const MmapFile = struct {
                     null,
                 );
 
-                // Check for error: Linux syscalls return error codes as negative values in range [-4095, -1]
                 const err_int = @as(isize, @bitCast(new_addr));
                 if (err_int < 0 and err_int > -4096) {
                     const err = @as(linux.E, @enumFromInt(-err_int));

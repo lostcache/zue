@@ -25,9 +25,7 @@ const Allocator = std.mem.Allocator;
 
 /// Follower state machine for async repair process
 pub const FollowerState = enum {
-    replicating,            // Normal replication, follower is in-sync
-    needs_repair,           // Detected offset_mismatch or lag, repair needed
-    repairing_probe_sent,   // Sent probe entry to find common prefix, awaiting response
+    replicating,            // Normal replication, follower is in-sync or catching up
     repairing_stream_sent,  // Sent batch of catch-up entries, awaiting response
 };
 
@@ -46,10 +44,6 @@ pub const FollowerConnection = struct {
     // Raft-like replication state
     match_index: ?u64, // Highest offset confirmed replicated on this follower (null = no data yet)
     next_index: u64,   // Next offset to send to this follower
-
-    // Async repair state
-    repair_probe_offset: ?u64, // Offset currently being probed during repair (null if not probing)
-    repair_retry_count: u32,   // Number of probe attempts made during current repair
 
     pub fn init(
         allocator: Allocator,
@@ -78,8 +72,6 @@ pub const FollowerConnection = struct {
             .allocator = allocator,
             .match_index = match_idx,
             .next_index = next_idx,
-            .repair_probe_offset = null,
-            .repair_retry_count = 0,
         };
     }
 
@@ -211,7 +203,6 @@ pub const Leader = struct {
     max_lag_entries: u64,
     commit_index: ?u64, // null means no entries committed yet
     repair_batch_size: u32, // Max entries per repair tick
-    repair_max_retries: u32, // Max probe retries during repair
     inline_catchup_threshold: u32, // Max entries to stream inline during write
 
     /// Initialize leader with cluster configuration
@@ -266,7 +257,6 @@ pub const Leader = struct {
             .max_lag_entries = config.replication.max_lag_entries,
             .commit_index = initial_commit_index,
             .repair_batch_size = config.replication.repair_batch_size,
-            .repair_max_retries = config.replication.repair_max_retries,
             .inline_catchup_threshold = config.replication.inline_catchup_threshold,
         };
     }
@@ -319,7 +309,6 @@ pub const Leader = struct {
         if (!follower.in_sync) {
             if (follower.stream == null) {
                 follower.connect() catch {
-                    follower.state = .needs_repair;
                     return .skip;
                 };
             }
@@ -332,7 +321,6 @@ pub const Leader = struct {
 
             // If lag exceeds threshold, defer to background
             if (lag > self.inline_catchup_threshold) {
-                follower.state = .needs_repair;
                 return .defer_to_background;
             }
             // Fall through to send inline
@@ -348,7 +336,6 @@ pub const Leader = struct {
         if (lag > 0 and lag <= self.inline_catchup_threshold) {
             return .send_inline;
         } else if (lag > self.inline_catchup_threshold) {
-            follower.state = .needs_repair;
             return .defer_to_background;
         }
 
@@ -446,8 +433,10 @@ pub const Leader = struct {
                 0;
             follower.in_sync = (current_lag <= self.max_lag_entries);
         } else if (resp.error_code == .offset_mismatch) {
-            // Offset mismatch - mark follower as needing repair
-            follower.state = .needs_repair;
+            // Offset mismatch - use follower's actual offset to jump directly
+            follower.match_index = resp.follower_offset;
+            follower.next_index = if (resp.follower_offset) |off| off + 1 else 0;
+            follower.state = .replicating; // Start streaming from this position
             follower.in_sync = false;
         } else {
             // Other error
@@ -487,7 +476,7 @@ pub const Leader = struct {
                     try pending_followers.append(self.allocator, follower);
                 },
                 .defer_to_background => {
-                    // Already marked as needs_repair in determineFollowerStrategy
+                    // Defer to background repair via tickRepair()
                     continue;
                 },
                 .skip => {
@@ -707,115 +696,10 @@ pub const Leader = struct {
             }
 
             switch (follower.state) {
-                .needs_repair => {
-                    // Start repair: send probe entry to find common prefix
-                    // Check retry limit
-                    if (follower.repair_retry_count >= self.repair_max_retries) {
-                        // Give up on this follower
-                        follower.in_sync = false;
-                        follower.state = .replicating; // Reset for future attempts
-                        follower.repair_retry_count = 0;
-                        return true;
-                    }
-
-                    // If next_index is 0, we've reached the beginning
-                    if (follower.next_index == 0) {
-                        // Start from offset 0
-                        follower.repair_probe_offset = null;
-                        follower.repair_retry_count = 0;
-                        // Transition to streaming state
-                        follower.state = .replicating;
-                        return true;
-                    }
-
-                    // Probe at next_index - 1
-                    const probe_offset = follower.next_index - 1;
-                    const probe_record = self.log.read(probe_offset, self.allocator) catch {
-                        follower.in_sync = false;
-                        return true;
-                    };
-                    defer {
-                        if (probe_record.key) |k| self.allocator.free(k);
-                        self.allocator.free(probe_record.value);
-                    }
-
-                    var entries = self.allocator.alloc(protocol.ReplicatedEntry, 1) catch {
-                        follower.in_sync = false;
-                        return true;
-                    };
-                    defer self.allocator.free(entries);
-
-                    entries[0] = protocol.ReplicatedEntry{
-                        .offset = probe_offset,
-                        .record = probe_record,
-                    };
-
-                    const req = ReplicateRequest{
-                        .entries = entries,
-                        .leader_commit = self.commit_index orelse 0,
-                    };
-
-                    // Send probe (non-blocking)
-                    self.sendReplicateRequestNonBlocking(follower, req) catch {
-                        follower.in_sync = false;
-                        return true;
-                    };
-
-                    // Transition to awaiting probe response
-                    follower.repair_probe_offset = probe_offset;
-                    follower.repair_retry_count += 1;
-                    follower.state = .repairing_probe_sent;
-                    return true;
-                },
-
-                .repairing_probe_sent => {
-                    // Check if probe response is ready (non-blocking)
-                    if (follower.stream == null) {
-                        follower.state = .needs_repair;
-                        follower.in_sync = false;
-                        return true;
-                    }
-
-                    // Poll with 0 timeout (non-blocking check)
-                    if (!isSocketReady(follower.stream.?, 0)) {
-                        // Not ready yet, yield
-                        return false;
-                    }
-
-                    // Read response (data is ready, should not block)
-                    const resp = self.receiveReplicateResponse(follower) catch {
-                        follower.state = .needs_repair;
-                        follower.in_sync = false;
-                        return true;
-                    };
-
-                    if (resp.success) {
-                        // Found common prefix!
-                        const probe_offset = follower.repair_probe_offset.?;
-                        follower.match_index = probe_offset;
-                        follower.next_index = probe_offset + 1;
-                        follower.repair_probe_offset = null;
-                        follower.repair_retry_count = 0;
-                        // Transition to replicating state (will stream missing entries next tick)
-                        follower.state = .replicating;
-                    } else if (resp.error_code == .offset_mismatch) {
-                        // Decrement and retry
-                        follower.next_index = follower.repair_probe_offset.?;
-                        follower.repair_probe_offset = null;
-                        follower.state = .needs_repair;
-                    } else {
-                        // Other error, give up
-                        follower.state = .needs_repair;
-                        follower.in_sync = false;
-                    }
-
-                    return true;
-                },
-
                 .repairing_stream_sent => {
                     // Check if streaming response is ready (non-blocking)
                     if (follower.stream == null) {
-                        follower.state = .needs_repair;
+                        follower.state = .replicating;
                         follower.in_sync = false;
                         return true;
                     }
@@ -828,19 +712,21 @@ pub const Leader = struct {
 
                     // Read response
                     const resp = self.receiveReplicateResponse(follower) catch {
-                        follower.state = .needs_repair;
+                        follower.state = .replicating;
                         follower.in_sync = false;
                         return true;
                     };
 
                     if (!resp.success) {
                         if (resp.error_code == .offset_mismatch) {
-                            // Need to repair
-                            follower.state = .needs_repair;
-                            follower.repair_retry_count = 0;
+                            // Use follower's actual offset to jump directly
+                            follower.match_index = resp.follower_offset;
+                            follower.next_index = if (resp.follower_offset) |off| off + 1 else 0;
+                            follower.state = .replicating;
+                            follower.in_sync = false;
                         } else {
                             follower.in_sync = false;
-                            follower.state = .needs_repair;
+                            follower.state = .replicating;
                         }
                         return true;
                     }
