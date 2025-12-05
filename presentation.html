@@ -6,6 +6,7 @@
     <title>Zue: Distributed Log</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@4.5.0/dist/reveal.css" />
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@4.5.0/dist/theme/black.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
     <style>
         .reveal h1 {
             color: #42b983;
@@ -117,7 +118,12 @@
     <div class="reveal">
         <div class="slides">
             <section>
-                <h1>Zue: Distributed Log</h1>
+                <h1>
+                    <div style="display: flex; align-items: center; justify-content: center;">
+                        <!-- <img src="Zue.png" alt="Zue Logo" style="width: 80px; background: transparent;" /> -->
+                        <span>Zue: Distributed Log</span>
+                    </div>
+                </h1>
                 <h3>Capstone Project</h3>
                 <p>Journey from Kernel to Distributed Systems</p>
                 <p style="margin-top: 2em">
@@ -376,44 +382,26 @@
 
             <section class="diagram-slide">
                 <h2>Follower Repair State Machine</h2>
-                <p class="small">Async non-blocking recovery process</p>
                 <div class="mermaid r-stretch" style="transform: scale(1); transform-origin: center">
-                    flowchart LR
-                    Start([Replicating])
-                    CheckLag{Follower\nLagging?}
-                    NeedsRepair[needs_repair]
-                    SendProbe[Send Probe\nat next_index-1]
-                    ProbeWait[repairing_probe_sent\nWait Non-blocking]
-                    ProbeResult{Probe\nMatch?}
-                    Decrement[Decrement\nnext_index]
-                    SendStream[Stream Batch\nof Entries]
-                    StreamWait[repairing_stream_sent\nWait Non-blocking]
-                    StreamResult{Caught\nUp?}
+                    flowchart TD
+                    Replicating[Background Repair: Every 2s]
+                    StreamSent[repairing_stream_sent\nAwait Response]
+                    CheckReady{Response\nReady?}
+                    ReadResp[Read Response]
+                    UpdateState[Update match_index\nnext_index]
 
-                    Start --> CheckLag
-                    CheckLag -->|No| Start
-                    CheckLag -->|Yes| NeedsRepair
-                    NeedsRepair --> SendProbe
-                    SendProbe --> ProbeWait
-                    ProbeWait --> ProbeResult
-                    ProbeResult -->|No| Decrement
-                    Decrement --> NeedsRepair
-                    ProbeResult -->|Yes| SendStream
-                    SendStream --> StreamWait
-                    StreamWait --> StreamResult
-                    StreamResult -->|No| SendStream
-                    StreamResult -->|Yes| Start
+                    Replicating --> StreamSent
+                    StreamSent --> CheckReady
+                    CheckReady -->|Not Ready| CheckReady
+                    CheckReady -->|Ready| ReadResp
+                    ReadResp --> UpdateState
+                    UpdateState --> Replicating
 
-                    style Start fill:#2a2a2a,stroke:#42b983,stroke-width:4px,color:#fff
-                    style NeedsRepair fill:#2a2a2a,stroke:#ff6b6b,stroke-width:3px,color:#fff
-                    style SendProbe fill:#2a2a2a,stroke:#ffa500,stroke-width:2px,color:#fff
-                    style ProbeWait fill:#2a2a2a,stroke:#ffa500,stroke-width:2px,color:#fff
-                    style SendStream fill:#2a2a2a,stroke:#64b5f6,stroke-width:2px,color:#fff
-                    style StreamWait fill:#2a2a2a,stroke:#64b5f6,stroke-width:2px,color:#fff
-                    style CheckLag fill:#2a2a2a,stroke:#fff,stroke-width:2px,color:#fff
-                    style ProbeResult fill:#2a2a2a,stroke:#fff,stroke-width:2px,color:#fff
-                    style StreamResult fill:#2a2a2a,stroke:#fff,stroke-width:2px,color:#fff
-                    style Decrement fill:#2a2a2a,stroke:#ff6b6b,stroke-width:2px,color:#fff
+                    style Replicating fill:#2a2a2a,stroke:#42b983,stroke-width:4px,color:#fff
+                    style StreamSent fill:#2a2a2a,stroke:#64b5f6,stroke-width:4px,color:#fff
+                    style UpdateState fill:#2a2a2a,stroke:#64b5f6,stroke-width:2px,color:#fff
+                    style CheckReady fill:#2a2a2a,stroke:#fff,stroke-width:2px,color:#fff
+                    style ReadResp fill:#2a2a2a,stroke:#fff,stroke-width:2px,color:#fff
                 </div>
             </section>
 
@@ -435,31 +423,14 @@
 
             <section>
                 <h2>Technical Learnings</h2>
-                <div class="three-col small">
-                    <div class="box">
-                        <h3>Distributed Systems</h3>
-                        <ul>
-                            <li>Raft semantics simplify correctness</li>
-                            <li>Quorum provides consistency</li>
-                            <li>Offset-based lag tracking</li>
-                        </ul>
-                    </div>
-                    <div class="box">
-                        <h3>Performance</h3>
-                        <ul>
-                            <li>mmap dramatic improvements</li>
-                            <li>Async state machines essential</li>
-                            <li>Zero-allocation for hot paths</li>
-                        </ul>
-                    </div>
-                    <div class="box">
-                        <h3>Software Eng</h3>
-                        <ul>
-                            <li>Integration tests catch critical bugs</li>
-                            <li>Type-safe optionals</li>
-                            <li>Clean separation</li>
-                        </ul>
-                    </div>
+                <div class="box">
+                    <ul>
+                        <li>Raft semantics</li>
+                        <li>mmap Syscall</li>
+                        <li>Async state machines & Event Loop Architecture</li>
+                        <li>Integration Testing</li>
+                        <li>Binary Protocol Design</li>
+                    </ul>
                 </div>
             </section>
 
@@ -513,30 +484,34 @@
                 </div>
             </section>
 
-            <section>
+            <section class="diagram-slide">
                 <h2>Agile Practices</h2>
-                <div class="two-col">
-                    <div class="box">
-                        <h3>Sprint Structure</h3>
-                        <ol class="small">
-                            <li>Goal Definition</li>
-                            <li>Backlog Selection</li>
-                            <li>Implementation</li>
-                            <li>Testing</li>
-                            <li>Review & Retrospective</li>
-                            <li>Re-grooming</li>
-                        </ol>
-                    </div>
-                    <div class="box">
-                        <h3>Adaptive Planning</h3>
-                        <ul class="small">
-                            <li>Sprint 1: Major pivot</li>
-                            <li>Sprint 2: Distributed-first</li>
-                            <li>Sprint 3: Refactoring</li>
-                            <li>Sprint 4: De-risk event loop</li>
-                            <li>Sprint 5: mmap optimization</li>
-                        </ul>
-                    </div>
+                <div class="mermaid r-stretch" style="transform: scale(1.5); transform-origin: center">
+                    flowchart LR
+                    GD[1. Goal Definition]
+                    BS[2. Backlog Selection]
+                    RR[3. Implementation Testing & Refactoring,\nBUT, \nwith, 4. Review & Retrospective]
+                    RG[5. Re-grooming]
+
+                    S1[Sprint 1: Major pivot]
+                    S2[Sprint 2: Distributed-first]
+                    S4[Sprint 4: De-risk event loop]
+                    S5[Sprint 5: mmap optimization]
+
+                    GD --> S1
+                    BS --> S2
+                    RR --> S4
+                    RG --> S5
+
+                    style GD fill:#2a2a2a,stroke:#42b983,stroke-width:3px,color:#fff
+                    style BS fill:#2a2a2a,stroke:#42b983,stroke-width:3px,color:#fff
+                    style RR fill:#2a2a2a,stroke:#42b983,stroke-width:3px,color:#fff
+                    style RG fill:#2a2a2a,stroke:#42b983,stroke-width:3px,color:#fff
+
+                    style S1 fill:#2a2a2a,stroke:#64b5f6,stroke-width:3px,color:#fff
+                    style S2 fill:#2a2a2a,stroke:#64b5f6,stroke-width:3px,color:#fff
+                    style S4 fill:#2a2a2a,stroke:#64b5f6,stroke-width:3px,color:#fff
+                    style S5 fill:#2a2a2a,stroke:#64b5f6,stroke-width:3px,color:#fff
                 </div>
             </section>
 
@@ -578,7 +553,7 @@
 
             <section class="dense-content">
                 <h2>Course Learnings Applied</h2>
-                <div style="font-size: 0.6em">
+                <div style="font-size: 0.8em">
                     <div class="two-col small">
                         <div class="box">
                             <h3>Agile & Scrum</h3>
@@ -642,7 +617,7 @@
                         <ul>
                             <li>When to optimize</li>
                             <li>Understanding trade-offs</li>
-                            <li>Technical debt mgmt</li>
+                            <li>Technical debt Management</li>
                         </ul>
                     </div>
                 </div>
@@ -679,20 +654,22 @@
 
             <section>
                 <h2>Project Status & Future Work</h2>
-                <div class="two-col">
+                <div class="two-col" style="font-size: 0.9em;">
                     <div class="box">
                         <h3>Current Status</h3>
-                        <p class="small">
-                            <strong>Production-ready distributed log*</strong>
-                        </p>
                         <ul class="small">
+                            <li>100% Production-ready distributed log*</li>
                             <li>Raft-like replication</li>
                             <li>5-100x performance gains</li>
-                            <li>117 unit + 12 integration tests</li>
-                            <li>Cross-platform</li>
+                            <li>150+ Unit-Tests </li>
+                            <li>30+ Integration Tests </li>
+                            <li>30+ Replication Tests </li>
+                            <li>Cross-platform (Linux & MacOS)**</li>
+
                         </ul>
                         <!-- insert vertical space -->
-                        <small style="margin-top: 2em">* Cloudfare called .unwrap() production-ready</small>
+                        <small style="margin-top: 2em; font-size: 0.4em;">* Cloudfare called .unwrap()
+                            production-ready</br>** 🖕 Windows</small>
                     </div>
                     <div class="box">
                         <h3>Future Work</h3>
@@ -720,17 +697,18 @@
             </section>
 
             <section>
+                <!-- <img src="Zue_W_Text.png" alt="Zue Logo"
+                    style="width: 250px; margin-bottom: 1em; background: transparent;" /> -->
                 <h1>Thank You!</h1>
                 <h2>Questions?</h2>
                 <p style="margin-top: 2em">
                     <strong>Harsh Devisha</strong>
                 </p>
                 <p style="margin-top: 1.5em; font-size: 0.8em">
-                    <strong>Zue GitHub:</strong>
+                    <strong><i class="fab fa-github"></i></strong>
                     <a href="https://github.com/lostcache/zue">github.com/lostcache/zue</a><br />
-                    <strong>Email:</strong> harshdevisha91@gmail.com<br />
-                    <strong>GitHub:</strong>
-                    <a href="https://github.com/lostcache">github.com/lostcache</a>
+                    <strong><i class="fas fa-envelope"></i></strong>
+                    <a href="mailto:harshdevisha91@gmail.com">harshdevisha91@gmail.com</a><br />
                 </p>
             </section>
         </div>
