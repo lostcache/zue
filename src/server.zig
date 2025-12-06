@@ -313,7 +313,7 @@ pub const Server = struct {
                     std.debug.print("Error reading from log: {}\n", .{err});
 
                     const error_code: Protocol.ErrorCode = switch (err) {
-                        error.OffsetOutOfBounds => .invalid_offset,
+                        error.OffsetNotFound => .invalid_offset,
                         else => .io_error,
                     };
 

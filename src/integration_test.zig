@@ -339,7 +339,7 @@ test "integration: read invalid offset returns error" {
 
     // Try to read from offset that doesn't exist
     const result = client.read(999999);
-    try testing.expectError(error.ServerError, result);
+    try testing.expectError(error.OffsetOutOfBounds, result);
 }
 
 test "integration: multiple sequential clients (single-threaded server pattern)" {

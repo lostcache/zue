@@ -7,6 +7,7 @@ pub const ClientError = error{
     ServerError,
     UnexpectedResponse,
     ConnectionClosed,
+    OffsetOutOfBounds,
 };
 
 pub const ClientConfig = struct {
@@ -147,6 +148,10 @@ pub const Client = struct {
             .read_response => |res| res.record,
             .error_response => |err| {
                 defer self.allocator.free(err.message);
+                if (err.code == .invalid_offset or err.code == .record_not_found) {
+                    std.debug.print("Offset out of bounds: {s}\n", .{err.message});
+                    return ClientError.OffsetOutOfBounds;
+                }
                 std.debug.print("Server error: {s} (code={})\n", .{ err.message, err.code });
                 return ClientError.ServerError;
             },
@@ -241,7 +246,7 @@ test "Client.readCompleteMessage returns body without length prefix" {
     // Simulate serialized message: [length:4][type:1][payload]
     const serialized = [_]u8{
         5, 0, 0, 0, // length = 5
-        2,          // type = append_response
+        2, // type = append_response
         0, 0, 0, 0, // offset = 0
     };
 
