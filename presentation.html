@@ -111,6 +111,69 @@
             font-size: 1.1em;
             margin: 0.3em 0;
         }
+
+        /* Custom fragment animations */
+        .fragment.fade-in-then-semi-out {
+            opacity: 0;
+        }
+
+        .fragment.fade-in-then-semi-out.visible {
+            opacity: 1;
+        }
+
+        .fragment.fade-in-then-semi-out.current-fragment {
+            opacity: 1;
+        }
+
+        .fragment.fade-in-then-semi-out.visible:not(.current-fragment) {
+            opacity: 0.4;
+        }
+
+        /* Smooth transitions for all fragments */
+        .slides section .fragment {
+            transition: all 0.5s ease;
+        }
+
+        /* Highlight pulse animation */
+        @keyframes pulse {
+            0% {
+                transform: scale(1);
+            }
+
+            50% {
+                transform: scale(1.05);
+            }
+
+            100% {
+                transform: scale(1);
+            }
+        }
+
+        .fragment.highlight-pulse.visible {
+            animation: pulse 0.8s ease;
+        }
+
+        /* Slide-in from left */
+        .fragment.slide-in-left {
+            transform: translateX(-100%);
+            opacity: 0;
+        }
+
+        .fragment.slide-in-left.visible {
+            transform: translateX(0);
+            opacity: 1;
+        }
+
+        /* Slide-in from right */
+        .fragment.slide-in-right {
+            transform: translateX(100%);
+            opacity: 0;
+        }
+
+        .fragment.slide-in-right.visible {
+            transform: translateX(0);
+            opacity: 1;
+        }
     </style>
 </head>
 
@@ -131,52 +194,52 @@
                 </p>
             </section>
 
-            <section>
+            <section data-auto-animate>
                 <h2>The Journey</h2>
                 <div class="two-col">
-                    <div class="box">
+                    <div class="box fragment fade-in-then-semi-out">
                         <h3>Sprint 1: Original Goal</h3>
                         <ul class="small">
-                            <li>Build OS kernel from scratch</li>
-                            <li>Process management</li>
-                            <li>Virtual memory (SV32)</li>
-                            <li>Network stack</li>
+                            <li class="fragment">Build OS kernel from scratch</li>
+                            <li class="fragment">Process management</li>
+                            <li class="fragment">Virtual memory (SV32)</li>
+                            <li class="fragment">Network stack</li>
                         </ul>
                     </div>
-                    <div class="box">
+                    <div class="box fragment fade-in">
                         <h3>Sprint 1 Pivot: Zue</h3>
                         <ul class="small">
-                            <li>Distributed log</li>
-                            <li>High-performance</li>
-                            <li>Implementation-heavy</li>
-                            <li>Aligned with interest</li>
+                            <li class="fragment">Distributed log</li>
+                            <li class="fragment">High-performance</li>
+                            <li class="fragment">Implementation-heavy</li>
+                            <li class="fragment">Aligned with interest</li>
                         </ul>
                     </div>
                 </div>
-                <p class="highlight" style="margin-top: 1em">
+                <p class="highlight fragment" style="margin-top: 1em">
                     <strong>Pivoted:</strong> Kernel work wouldn't focus on
                     distributed systems
                 </p>
             </section>
 
-            <section>
+            <section data-auto-animate>
                 <h2 class="r-fit-text">Project Objectives</h2>
                 <div class="two-col medium">
-                    <div class="box">
+                    <div class="box fragment slide-in-left">
                         <h3>Storage Engine</h3>
                         <ul>
-                            <li>Append-only log</li>
-                            <li>Sparse index</li>
-                            <li>CRC validation</li>
+                            <li class="fragment">Append-only log</li>
+                            <li class="fragment">Sparse index</li>
+                            <li class="fragment">CRC validation</li>
                         </ul>
                     </div>
-                    <div class="box">
+                    <div class="box fragment slide-in-right">
                         <h3>Replication</h3>
                         <ul>
-                            <li>Raft-like consensus</li>
-                            <li>Quorum commits</li>
-                            <li>Auto Repair</li>
-                            <li>Non-blocking</li>
+                            <li class="fragment">Raft-like consensus</li>
+                            <li class="fragment">Quorum commits</li>
+                            <li class="fragment">Auto Repair</li>
+                            <li class="fragment">Non-blocking</li>
                         </ul>
                     </div>
                 </div>
@@ -184,7 +247,7 @@
 
             <section class="diagram-slide">
                 <h2>System Architecture</h2>
-                <p style="margin-top: 1em">
+                <p class="fragment fade-up" style="margin-top: 1em">
                     Single-leader replication with quorum commits
                 </p>
                 <div class="mermaid r-stretch" style="transform: scale(1.5); transform-origin: center">
@@ -404,38 +467,38 @@
                 </div>
             </section>
 
-            <section class="dense-content">
+            <section class="dense-content" data-auto-animate>
                 <h2 class="r-fit-text">MmapPerformance Gains</h2>
-                <div class="metric">10-100x</div>
-                <p>
+                <div class="metric fragment highlight-pulse">10-100x</div>
+                <p class="fragment fade-up">
                     <strong>Faster Index Lookups</strong> (binary search in
                     memory, 0 syscalls)
                 </p>
-                <div class="metric">5-50x</div>
-                <p>
+                <div class="metric fragment highlight-pulse">5-50x</div>
+                <p class="fragment fade-up">
                     <strong>Faster Log Reads</strong> (direct memory access,
                     zero-copy)
                 </p>
-                <div class="metric">3-20x</div>
-                <p><strong>Faster Writes</strong> (direct memory writes)</p>
+                <div class="metric fragment highlight-pulse">3-20x</div>
+                <p class="fragment fade-up"><strong>Faster Writes</strong> (direct memory writes)</p>
             </section>
 
-            <section>
+            <section data-auto-animate>
                 <h2>Project Evolution Learnings</h2>
                 <div style="font-size: 0.6em">
-                    <div class="box">
+                    <div class="box fragment fade-up">
                         <h3>Sprint 1: Know When to Pivot</h3>
                         <p class="small">
                             Get feedback early, pivot when necessary
                         </p>
                     </div>
-                    <div class="box">
+                    <div class="box fragment fade-up">
                         <h3>Sprint 2-3: Solid Foundation</h3>
                         <p class="small">
                             Upfront architectural work pays dividends
                         </p>
                     </div>
-                    <div class="box">
+                    <div class="box fragment fade-up">
                         <h3>Sprint 4-5: De-risk First</h3>
                         <p class="small">
                             Address architectural risks early
@@ -444,26 +507,26 @@
                 </div>
             </section>
 
-            <section>
+            <section data-auto-animate>
                 <h2>Project Management</h2>
                 <div class="two-col">
-                    <div class="box">
+                    <div class="box fragment slide-in-left">
                         <h3>Tools</h3>
                         <ul class="small">
-                            <li>
+                            <li class="fragment">
                                 <strong>JIRA:</strong> Sprint planning,
                                 burndown
                             </li>
-                            <li><strong>Git:</strong> Version control</li>
-                            <li><strong>LaTeX:</strong> Documentation</li>
+                            <li class="fragment"><strong>Git:</strong> Version control</li>
+                            <li class="fragment"><strong>LaTeX:</strong> Documentation</li>
                         </ul>
                     </div>
-                    <div class="box">
+                    <div class="box fragment slide-in-right">
                         <h3>Processes</h3>
                         <ul class="small">
-                            <li>Backlog Grooming</li>
-                            <li>Sprint</li>
-                            <li>Retrospective</li>
+                            <li class="fragment">Backlog Grooming</li>
+                            <li class="fragment">Sprint</li>
+                            <li class="fragment">Retrospective</li>
                         </ul>
                     </div>
                 </div>
@@ -500,136 +563,136 @@
                 </div>
             </section>
 
-            <section>
+            <section data-auto-animate>
                 <h2>Test-Driven Development</h2>
-                <table class="small">
+                <table class="small fragment fade-in">
                     <tr>
                         <th>Sprint</th>
                         <th>Test Count</th>
                         <th>Focus</th>
                     </tr>
-                    <tr>
+                    <tr class="fragment">
                         <td>2-3</td>
                         <td>--</td>
                         <td>Core modules</td>
                     </tr>
-                    <tr>
+                    <tr class="fragment">
                         <td>4</td>
                         <td>77 → 165</td>
                         <td>Event loop, network</td>
                     </tr>
-                    <tr>
+                    <tr class="fragment">
                         <td>5</td>
                         <td>117 + 12</td>
                         <td>Full replication</td>
                     </tr>
                 </table>
-                <div class="box" style="margin-top: 1em">
+                <div class="box fragment fade-up" style="margin-top: 1em">
                     <p class="small">
                         <strong>Scenarios:</strong> Replication, quorum,
                         failures, catch-up, partitions, concurrent writes
                     </p>
-                    <p class="success small">
+                    <p class="success small fragment highlight-pulse">
                         <strong>Impact:</strong> Caught 2 critical bugs
                         before production
                     </p>
                 </div>
             </section>
 
-            <section class="dense-content">
+            <section class="dense-content" data-auto-animate>
                 <h2>Course Learnings Applied</h2>
                 <div style="font-size: 0.8em">
                     <div class="two-col small">
-                        <div class="box">
+                        <div class="box fragment fade-up">
                             <h3>Agile & Scrum</h3>
                             <ul>
-                                <li>Sprint-based planning</li>
-                                <li>Retrospectives drive improvement</li>
-                                <li>Adaptive planning</li>
+                                <li class="fragment">Sprint-based planning</li>
+                                <li class="fragment">Retrospectives drive improvement</li>
+                                <li class="fragment">Adaptive planning</li>
                             </ul>
                         </div>
-                        <div class="box">
+                        <div class="box fragment fade-up">
                             <h3>Software Engineering</h3>
                             <ul>
-                                <li>Separation of concerns</li>
-                                <li>Comprehensive testing</li>
-                                <li>Clean APIs</li>
+                                <li class="fragment">Separation of concerns</li>
+                                <li class="fragment">Comprehensive testing</li>
+                                <li class="fragment">Clean APIs (Minimizing Surface Area)</li>
                             </ul>
                         </div>
-                        <div class="box">
+                        <div class="box fragment fade-up">
                             <h3>Risk Management</h3>
                             <ul>
-                                <li>Identify risks early</li>
-                                <li>Tackle hard problems first</li>
-                                <li>Platform testing</li>
+                                <li class="fragment">Identify risks early</li>
+                                <li class="fragment">Tackle hard problems first</li>
+                                <li class="fragment">Platform testing</li>
                             </ul>
                         </div>
-                        <div class="box">
+                        <div class="box fragment fade-up">
                             <h3>Documentation</h3>
                             <ul>
-                                <li>Sprint reports with metrics</li>
-                                <li>Architecture docs</li>
-                                <li>Clear commits</li>
+                                <li class="fragment">Sprint reports with metrics</li>
+                                <li class="fragment">Architecture docs</li>
+                                <li class="fragment">Clear commits</li>
                             </ul>
                         </div>
                     </div>
                 </div>
             </section>
 
-            <section>
+            <section data-auto-animate>
                 <h2>Personal Growth</h2>
                 <div class="three-col small">
-                    <div class="box">
+                    <div class="box fragment fade-up">
                         <h3>Technical</h3>
                         <ul>
-                            <li>Raft semantics</li>
-                            <li>mmap Syscall</li>
-                            <li>Async state machines & Event Loop Architecture</li>
-                            <li>Integration Testing</li>
-                            <li>Binary Protocol Design</li>
+                            <li class="fragment">Raft semantics</li>
+                            <li class="fragment">mmap Syscall</li>
+                            <li class="fragment">Async state machines & Event Loop Architecture</li>
+                            <li class="fragment">Integration Testing</li>
+                            <li class="fragment">Binary Protocol Design</li>
                         </ul>
                     </div>
-                    <div class="box">
+                    <div class="box fragment fade-up">
                         <h3>Soft Skills</h3>
                         <ul>
-                            <li>Knowing when to pivot</li>
-                            <li>Solo Project planning, then Articulating</li>
-                            <li>Articulating problems</li>
+                            <li class="fragment">Solo Project planning, then Articulating</li>
+                            <li class="fragment">Articulating problems</li>
                         </ul>
                     </div>
-                    <div class="box">
+                    <div class="box fragment fade-up">
                         <h3>Engineering Judgment</h3>
                         <ul>
-                            <li>When to optimize</li>
-                            <li>Understanding trade-offs</li>
-                            <li>Technical debt Management</li>
-                            <li>Pragmatism</li>
+                            <li class="fragment">Knowing when to pivot</li>
+                            <li class="fragment">When to optimize</li>
+                            <li class="fragment">Understanding trade-offs</li>
+                            <li class="fragment">Technical debt Management</li>
+                            <li class="fragment">Pragmatism</li>
                         </ul>
                     </div>
                 </div>
             </section>
 
-            <section class="dense-content">
+            <section class="dense-content" data-auto-animate>
                 <h2>Key Takeaways</h2>
                 <div style="font-size: 0.6em">
-                    <div class="box">
+                    <div class="box fragment highlight-pulse">
                         <h3>1. Alignment Matters</h3>
                         <p class="small">Early pivot enabled success</p>
                     </div>
-                    <div class="box">
+                    <div class="box fragment highlight-pulse">
                         <h3>2. Architecture is Foundation</h3>
                         <p class="small">
                             Clean design investment paid off
                         </p>
                     </div>
-                    <div class="box">
+                    <div class="box fragment highlight-pulse">
                         <h3>3. Testing Builds Confidence</h3>
                         <p class="small">
                             117 unit + 12 integration tests caught critical
                             bugs
                         </p>
                     </div>
-                    <div class="box">
+                    <div class="box fragment highlight-pulse">
                         <h3>4. Continuous Learning</h3>
                         <p class="small">
                             Each sprint built on previous learnings
@@ -638,46 +701,48 @@
                 </div>
             </section>
 
-            <section>
+            <section data-auto-animate>
                 <h2>Project Status & Future Work</h2>
                 <div class="two-col" style="font-size: 0.9em;">
                     <div class="box">
                         <h3>Current Status</h3>
                         <ul class="small">
-                            <li>100% Production-ready distributed log*</li>
-                            <li>Raft-like replication</li>
-                            <li>5-100x performance gains</li>
-                            <li>150+ Unit-Tests </li>
-                            <li>30+ Integration Tests </li>
-                            <li>30+ Replication Tests </li>
-                            <li>Cross-platform (Linux & MacOS)**</li>
-
+                            <li class="fragment" data-fragment-index="1">100% Production-ready distributed log*</li>
+                            <li class="fragment" data-fragment-index="2">Raft-like replication</li>
+                            <li class="fragment" data-fragment-index="3">5-100x performance gains</li>
+                            <li class="fragment" data-fragment-index="4">150+ Unit-Tests </li>
+                            <li class="fragment" data-fragment-index="5">30+ Integration Tests </li>
+                            <li class="fragment" data-fragment-index="6">30+ Replication Tests </li>
+                            <li class="fragment" data-fragment-index="7">Cross-platform (Linux & MacOS)**</li>
                         </ul>
-                        <!-- insert vertical space -->
-                        <small style="margin-top: 2em; font-size: 0.4em;">* Cloudfare called .unwrap()
-                            production-ready</br>** 🖕 Windows</small>
+                        <div style="margin-top: 2em;">
+                            <small class="fragment fade-in" data-fragment-index="1"
+                                style="font-size: 0.4em; display: block;">* Cloudfare called .unwrap() production-ready</small>
+                            <small class="fragment fade-in" data-fragment-index="7"
+                                style="font-size: 0.4em; display: block;">** 🖕 Windows</small>
+                        </div>
                     </div>
                     <div class="box">
                         <h3>Future Work</h3>
                         <ul class="small">
-                            <li>Cluster monitoring APIs</li>
-                            <li>Leader election</li>
-                            <li>Operational tooling</li>
-                            <li>Performance tuning</li>
+                            <li class="fragment" data-fragment-index="8">Cluster monitoring APIs</li>
+                            <li class="fragment" data-fragment-index="9">Leader election</li>
+                            <li class="fragment" data-fragment-index="10">Operational tooling</li>
+                            <li class="fragment" data-fragment-index="11">Performance tuning</li>
                         </ul>
                     </div>
                 </div>
             </section>
 
-            <section>
+            <section data-auto-animate>
                 <h2>Live Demo</h2>
-                <div class="box">
+                <div class="box fragment fade-up">
                     <h3>Multi-node Cluster</h3>
                     <ul>
-                        <li>Leader & 2 followers</li>
-                        <li>Client writes with quorum confirmation</li>
-                        <li>Follower failure & recovery</li>
-                        <li>Automatic catch-up mechanism</li>
+                        <li class="fragment">Leader & 2 followers</li>
+                        <li class="fragment">Client writes with quorum confirmation</li>
+                        <li class="fragment">Follower failure & recovery</li>
+                        <li class="fragment">Automatic catch-up mechanism</li>
                     </ul>
                 </div>
             </section>
@@ -708,8 +773,17 @@
             progress: true,
             center: true,
             transition: "slide",
+            transitionSpeed: "default",
             width: 1280,
             height: 720,
+            // Enable fragment navigation in URL
+            fragmentInURL: true,
+            // Slide animation settings
+            autoAnimateEasing: "ease",
+            autoAnimateDuration: 0.8,
+            autoAnimateUnmatched: true,
+            // Show fragments one by one
+            navigationMode: "linear",
             plugins: [
                 {
                     id: "mermaid",
