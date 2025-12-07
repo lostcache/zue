@@ -175,8 +175,8 @@
                         <ul>
                             <li>Raft-like consensus</li>
                             <li>Quorum commits</li>
-                            <li>Auto recovery</li>
-                            <li>Non-blocking I/O</li>
+                            <li>Auto Repair</li>
+                            <li>Non-blocking</li>
                         </ul>
                     </div>
                 </div>
@@ -269,8 +269,32 @@
             </section>
 
             <section class="diagram-slide">
+                <h2>Replication Flow</h2>
+                <div class="mermaid r-stretch">
+                    sequenceDiagram
+                    participant C as Client
+                    participant L as Leader
+                    participant F as Follower
+                    C->>L: Append Record
+                    activate L
+                    L->>L: Append to Mmap
+                    par Parallel Replication
+                    L->>F: Replicate Entries
+                    activate F
+                    F->>F: Validate & Mmap Write
+                    F-->>L: Success match_index
+                    deactivate F
+                    and
+                    L->>L: Wait for Quorum
+                    end
+                    L->>L: Commit and Advance Index
+                    L-->>C: Success offset
+                    deactivate L
+                </div>
+            </section>
+
+            <section class="diagram-slide">
                 <h2>Follower Event Loop</h2>
-                <p class="small">Processes replication and heartbeat requests from leader</p>
                 <div class="mermaid r-stretch" style="transform: scale(1); transform-origin: center">
                     flowchart LR
                     Start([Start Loop])
@@ -356,31 +380,6 @@
             </section>
 
             <section class="diagram-slide">
-                <h2>Replication Flow</h2>
-                <div class="mermaid r-stretch">
-                    sequenceDiagram
-                    participant C as Client
-                    participant L as Leader
-                    participant F as Follower
-                    C->>L: Append Record
-                    activate L
-                    L->>L: Append to Mmap
-                    par Parallel Replication
-                    L->>F: Replicate Entries
-                    activate F
-                    F->>F: Validate & Mmap Write
-                    F-->>L: Success match_index
-                    deactivate F
-                    and
-                    L->>L: Wait for Quorum
-                    end
-                    L->>L: Commit and Advance Index
-                    L-->>C: Success offset
-                    deactivate L
-                </div>
-            </section>
-
-            <section class="diagram-slide">
                 <h2>Follower Repair State Machine</h2>
                 <div class="mermaid r-stretch" style="transform: scale(1); transform-origin: center">
                     flowchart TD
@@ -419,19 +418,6 @@
                 </p>
                 <div class="metric">3-20x</div>
                 <p><strong>Faster Writes</strong> (direct memory writes)</p>
-            </section>
-
-            <section>
-                <h2>Technical Learnings</h2>
-                <div class="box">
-                    <ul>
-                        <li>Raft semantics</li>
-                        <li>mmap Syscall</li>
-                        <li>Async state machines & Event Loop Architecture</li>
-                        <li>Integration Testing</li>
-                        <li>Binary Protocol Design</li>
-                    </ul>
-                </div>
             </section>
 
             <section>
@@ -475,10 +461,9 @@
                     <div class="box">
                         <h3>Processes</h3>
                         <ul class="small">
-                            <li>Sprint Planning</li>
-                            <li>Sprint Review</li>
-                            <li>Retrospective</li>
                             <li>Backlog Grooming</li>
+                            <li>Sprint</li>
+                            <li>Retrospective</li>
                         </ul>
                     </div>
                 </div>
@@ -597,19 +582,19 @@
                     <div class="box">
                         <h3>Technical</h3>
                         <ul>
-                            <li>Distributed systems</li>
-                            <li>Systems programming</li>
-                            <li>Performance optimization</li>
-                            <li>Cross-platform dev</li>
+                            <li>Raft semantics</li>
+                            <li>mmap Syscall</li>
+                            <li>Async state machines & Event Loop Architecture</li>
+                            <li>Integration Testing</li>
+                            <li>Binary Protocol Design</li>
                         </ul>
                     </div>
                     <div class="box">
                         <h3>Soft Skills</h3>
                         <ul>
-                            <li>Project planning</li>
                             <li>Knowing when to pivot</li>
-                            <li>Breaking down problems</li>
-                            <li>Pragmatism</li>
+                            <li>Solo Project planning, then Articulating</li>
+                            <li>Articulating problems</li>
                         </ul>
                     </div>
                     <div class="box">
@@ -618,6 +603,7 @@
                             <li>When to optimize</li>
                             <li>Understanding trade-offs</li>
                             <li>Technical debt Management</li>
+                            <li>Pragmatism</li>
                         </ul>
                     </div>
                 </div>
