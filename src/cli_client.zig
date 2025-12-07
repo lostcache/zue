@@ -1,5 +1,5 @@
 const std = @import("std");
-const Client = @import("client.zig").Client;
+const client = @import("client.zig");
 const Record = @import("log/record.zig").Record;
 
 pub fn main() !void {
@@ -40,14 +40,14 @@ fn handleAppend(args: [][:0]u8, allocator: std.mem.Allocator) !void {
     const key = if (std.mem.eql(u8, args[4], "-")) null else args[4];
     const value = args[5];
 
-    var client = try Client.connect(host, port, allocator);
-    defer client.disconnect();
+    var c = try client.Client.connect(host, port, allocator);
+    defer c.disconnect();
 
     const record = Record{
         .key = key,
         .value = value,
     };
-    const offset = try client.append(record);
+    const offset = try c.append(record);
     std.debug.print("{}\n", .{offset});
 }
 
@@ -61,10 +61,15 @@ fn handleRead(args: [][:0]u8, allocator: std.mem.Allocator) !void {
     const port = try std.fmt.parseInt(u16, args[3], 10);
     const offset = try std.fmt.parseInt(u64, args[4], 10);
 
-    var client = try Client.connect(host, port, allocator);
-    defer client.disconnect();
+    var c = try client.Client.connect(host, port, allocator);
+    defer c.disconnect();
 
-    const record = try client.read(offset);
+    const record = c.read(offset) catch |err| {
+        if (err == client.ClientError.OffsetOutOfBounds) {
+            return;
+        }
+        return err;
+    };
     defer {
         if (record.key) |k| allocator.free(k);
         allocator.free(record.value);
