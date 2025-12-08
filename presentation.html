@@ -197,7 +197,7 @@
             <section data-auto-animate>
                 <h2>The Journey</h2>
                 <div class="two-col">
-                    <div class="box fragment fade-in-then-semi-out">
+                    <div class="box fragment fade-in">
                         <h3>Sprint 1: Original Goal</h3>
                         <ul class="small">
                             <li class="fragment">Build OS kernel from scratch</li>
@@ -469,18 +469,123 @@
 
             <section class="dense-content" data-auto-animate>
                 <h2 class="r-fit-text">MmapPerformance Gains</h2>
-                <div class="metric fragment highlight-pulse">10-100x</div>
-                <p class="fragment fade-up">
-                    <strong>Faster Index Lookups</strong> (binary search in
-                    memory, 0 syscalls)
-                </p>
-                <div class="metric fragment highlight-pulse">5-50x</div>
-                <p class="fragment fade-up">
-                    <strong>Faster Log Reads</strong> (direct memory access,
-                    zero-copy)
-                </p>
-                <div class="metric fragment highlight-pulse">3-20x</div>
-                <p class="fragment fade-up"><strong>Faster Writes</strong> (direct memory writes)</p>
+                <div class="two-col" style="gap: 2em;">
+                    <div class="mermaid" style="transform: scale(1.1); transform-origin: center">
+                        graph TB
+                        App["Application Code<br />ptr = mmap(file)"]
+
+                        subgraph Disk ["DISK"]
+                        F0["[0] 0x41"]
+                        F1["[1] 0x42"]
+                        F2["[2] 0x43"]
+                        F3["[3] 0x44"]
+                        end
+
+                        Map["mmap() creates<br />mapping"]
+
+                        subgraph RAM ["PHYSICAL RAM"]
+                        R0["0x41"]
+                        R1["0x42"]
+                        R2["0x43"]
+                        R3["0x44"]
+                        end
+
+                        Ptr["ptr[0], ptr[1], ptr[2], ptr[3]<br />Direct pointer access<br />NO syscalls!"]
+
+                        Write["ptr[2] = 0xFF"]
+
+                        subgraph RAM2 ["RAM AFTER WRITE"]
+                        R20["0x41"]
+                        R21["0x42"]
+                        R22["0xFF ✨"]
+                        R23["0x44"]
+                        end
+
+                        Sync["OS syncs<br />dirty pages"]
+
+                        subgraph Disk2 ["DISK AFTER SYNC"]
+                        F20["[0] 0x41"]
+                        F21["[1] 0x42"]
+                        F22["[2] 0xFF ✨"]
+                        F23["[3] 0x44"]
+                        end
+
+                        App --> Map
+                        F0 -.-> Map
+                        F1 -.-> Map
+                        F2 -.-> Map
+                        F3 -.-> Map
+
+                        Map --> R0
+                        Map --> R1
+                        Map --> R2
+                        Map --> R3
+
+                        R0 --> Ptr
+                        R1 --> Ptr
+                        R2 --> Ptr
+                        R3 --> Ptr
+
+                        Ptr --> Write
+
+                        Write --> R20
+                        Write --> R21
+                        Write --> R22
+                        Write --> R23
+
+                        R22 --> Sync
+
+                        Sync --> F20
+                        Sync --> F21
+                        Sync --> F22
+                        Sync --> F23
+
+                        style App fill:#2a2a2a,stroke:#fff,stroke-width:3px,color:#fff
+                        style Map fill:#2a2a2a,stroke:#42b983,stroke-width:3px,color:#fff
+                        style Ptr fill:#2a2a2a,stroke:#42b983,stroke-width:3px,color:#fff
+                        style Write fill:#2a2a2a,stroke:#ffa500,stroke-width:3px,color:#fff
+                        style Sync fill:#2a2a2a,stroke:#42b983,stroke-width:2px,color:#fff
+
+                        style Disk fill:transparent,stroke:#64b5f6,stroke-width:2px,color:#fff
+                        style RAM fill:transparent,stroke:#ffa500,stroke-width:3px,color:#fff
+                        style RAM2 fill:transparent,stroke:#ffa500,stroke-width:3px,color:#fff
+                        style Disk2 fill:transparent,stroke:#42b983,stroke-width:2px,color:#fff
+
+                        style F0 fill:#2a2a2a,stroke:#64b5f6,stroke-width:2px,color:#fff
+                        style F1 fill:#2a2a2a,stroke:#64b5f6,stroke-width:2px,color:#fff
+                        style F2 fill:#2a2a2a,stroke:#64b5f6,stroke-width:2px,color:#fff
+                        style F3 fill:#2a2a2a,stroke:#64b5f6,stroke-width:2px,color:#fff
+
+                        style R0 fill:#2a2a2a,stroke:#ffa500,stroke-width:2px,color:#fff
+                        style R1 fill:#2a2a2a,stroke:#ffa500,stroke-width:2px,color:#fff
+                        style R2 fill:#2a2a2a,stroke:#ffa500,stroke-width:2px,color:#fff
+                        style R3 fill:#2a2a2a,stroke:#ffa500,stroke-width:2px,color:#fff
+
+                        style R20 fill:#2a2a2a,stroke:#ffa500,stroke-width:2px,color:#fff
+                        style R21 fill:#2a2a2a,stroke:#ffa500,stroke-width:2px,color:#fff
+                        style R22 fill:#2a2a2a,stroke:#ff0000,stroke-width:3px,color:#fff
+                        style R23 fill:#2a2a2a,stroke:#ffa500,stroke-width:2px,color:#fff
+
+                        style F20 fill:#2a2a2a,stroke:#42b983,stroke-width:2px,color:#fff
+                        style F21 fill:#2a2a2a,stroke:#42b983,stroke-width:2px,color:#fff
+                        style F22 fill:#2a2a2a,stroke:#ff0000,stroke-width:3px,color:#fff
+                        style F23 fill:#2a2a2a,stroke:#42b983,stroke-width:2px,color:#fff
+                    </div>
+                    <div>
+                        <div class="metric fragment highlight-pulse" style="font-size: 1em;">10-100x</div>
+                        <p class="fragment fade-up" style="font-size: 0.65em;">
+                            <strong>Faster Index Lookups</strong> (binary search in memory, 0 syscalls)
+                        </p>
+                        <div class="metric fragment highlight-pulse" style="font-size: 1em;">5-50x</div>
+                        <p class="fragment fade-up" style="font-size: 0.65em;">
+                            <strong>Faster Log Reads</strong> (direct memory access, zero-copy)
+                        </p>
+                        <div class="metric fragment highlight-pulse" style="font-size: 1em;">3-20x</div>
+                        <p class="fragment fade-up" style="font-size: 0.65em;"><strong>Faster Writes</strong> (direct
+                            memory writes)
+                        </p>
+                    </div>
+                </div>
             </section>
 
             <section data-auto-animate>
@@ -717,7 +822,8 @@
                         </ul>
                         <div style="margin-top: 2em;">
                             <small class="fragment fade-in" data-fragment-index="1"
-                                style="font-size: 0.4em; display: block;">* Cloudfare called .unwrap() production-ready</small>
+                                style="font-size: 0.4em; display: block;">* Cloudfare called .unwrap()
+                                production-ready</small>
                             <small class="fragment fade-in" data-fragment-index="7"
                                 style="font-size: 0.4em; display: block;">** 🖕 Windows</small>
                         </div>
