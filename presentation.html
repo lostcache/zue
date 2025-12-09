@@ -79,6 +79,8 @@
         .mermaid svg {
             max-width: 100%;
             max-height: 100%;
+            shape-rendering: geometricPrecision;
+            text-rendering: geometricPrecision;
         }
 
         /* Ensure font consistency */
@@ -250,7 +252,9 @@
                 <p class="fragment fade-up" style="margin-top: 1em">
                     Single-leader replication with quorum commits
                 </p>
-                <div class="mermaid r-stretch" style="transform: scale(1.5); transform-origin: center">
+                <div class="mermaid r-stretch">
+                    %%{init: {'theme':'base', 'themeVariables': {'fontSize':'30px'}, 'flowchart':{'nodeSpacing': 100,
+                    'rankSpacing': 100}}}%%
                     graph TD
                     Client[Client App]
                     subgraph Cluster [" "]
@@ -268,9 +272,9 @@
                 </div>
             </section>
 
-            <section class="diagram-slide">
+            <section class=" diagram-slide">
                 <h2>Log Structure</h2>
-                <div class="mermaid r-stretch" style="transform: scale(1); transform-origin: center">
+                <div class="mermaid r-stretch">
                     graph LR
                     subgraph Log [Log]
                     direction TB
@@ -358,7 +362,7 @@
 
             <section class="diagram-slide">
                 <h2>Follower Event Loop</h2>
-                <div class="mermaid r-stretch" style="transform: scale(1); transform-origin: center">
+                <div class="mermaid r-stretch">
                     flowchart LR
                     Start([Start Loop])
                     Ready{Sockets\nReady?}
@@ -398,7 +402,9 @@
 
             <section class="diagram-slide">
                 <h2>Leader Event Loop</h2>
-                <div class="mermaid r-stretch" style="transform: scale(1); transform-origin: center">
+                <div class="mermaid r-stretch">
+                    %%{init: {'theme':'base', 'themeVariables': {'fontSize':'40px'}, 'flowchart':{'nodeSpacing': 80,
+                    'rankSpacing': 80}}}%%
                     flowchart LR
                     Start([Start Loop])
                     Timer{Timer\nExpired?\n2s interval}
@@ -444,7 +450,7 @@
 
             <section class="diagram-slide">
                 <h2>Follower Repair State Machine</h2>
-                <div class="mermaid r-stretch" style="transform: scale(1); transform-origin: center">
+                <div class="mermaid r-stretch">
                     flowchart TD
                     Replicating[Background Repair: Every 2s]
                     StreamSent[repairing_stream_sent\nAwait Response]
@@ -469,10 +475,11 @@
 
             <section class="dense-content" data-auto-animate>
                 <h2 class="r-fit-text">MmapPerformance Gains</h2>
-                <div class="two-col" style="gap: 2em;">
-                    <div class="mermaid" style="transform: scale(1.1); transform-origin: center">
+                <div class="two-col" style="gap: 0em;">
+                    <div class="mermaid" style="margin-top: -2em;">
+                        %%{init: {'theme':'base', 'themeVariables': {'fontSize':'14px'}, 'flowchart':{'nodeSpacing': 30, 'rankSpacing': 30}}}%%
                         graph TB
-                        App["Application Code<br />ptr = mmap(file)"]
+                        App["Application Code\nptr = mmap(file)"]
 
                         subgraph Disk ["DISK"]
                         F0["[0] 0x41"]
@@ -481,7 +488,7 @@
                         F3["[3] 0x44"]
                         end
 
-                        Map["mmap() creates<br />mapping"]
+                        Map["mmap() creates\nmapping"]
 
                         subgraph RAM ["PHYSICAL RAM"]
                         R0["0x41"]
@@ -490,7 +497,7 @@
                         R3["0x44"]
                         end
 
-                        Ptr["ptr[0], ptr[1], ptr[2], ptr[3]<br />Direct pointer access<br />NO syscalls!"]
+                        Ptr["ptr[0], ptr[1], ptr[2], ptr[3]\nDirect pointer access\nNO syscalls!"]
 
                         Write["ptr[2] = 0xFF"]
 
@@ -501,7 +508,7 @@
                         R23["0x44"]
                         end
 
-                        Sync["OS syncs<br />dirty pages"]
+                        Sync["OS syncs\ndirty pages"]
 
                         subgraph Disk2 ["DISK AFTER SYNC"]
                         F20["[0] 0x41"]
@@ -639,7 +646,7 @@
 
             <section class="diagram-slide">
                 <h2>Agile Practices</h2>
-                <div class="mermaid r-stretch" style="transform: scale(1.5); transform-origin: center">
+                <div class="mermaid r-stretch">
                     flowchart LR
                     GD[1. Goal Definition]
                     BS[2. Backlog Selection]
@@ -931,6 +938,7 @@
                             flowchart: {
                                 htmlLabels: false,
                                 curve: "linear",
+                                useMaxWidth: false,
                             },
                             sequence: {
                                 actorMargin: 50,
@@ -943,7 +951,7 @@
                                 bottomMarginAdj: 1,
                                 useMaxWidth: true,
                             },
-                            fontSize: 16,
+                            fontSize: 24,
                         });
                         const nodes = document.querySelectorAll(".mermaid");
                         const promises = [];
