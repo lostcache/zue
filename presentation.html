@@ -376,7 +376,7 @@
                     Type -->|Listener| Accept
                     Type -->|Client| MsgType
                     Accept --> Cleanup
-                    MsgType -->|Append/Read| ClientReq
+                    MsgType -->|Read| ClientReq
                     MsgType -->|Replicate| Replicate
                     MsgType -->|Heartbeat| Heartbeat
                     ClientReq --> Cleanup
@@ -497,7 +497,7 @@
                         subgraph RAM2 ["RAM AFTER WRITE"]
                         R20["0x41"]
                         R21["0x42"]
-                        R22["0xFF ✨"]
+                        R22["0xFF"]
                         R23["0x44"]
                         end
 
@@ -506,7 +506,7 @@
                         subgraph Disk2 ["DISK AFTER SYNC"]
                         F20["[0] 0x41"]
                         F21["[1] 0x42"]
-                        F22["[2] 0xFF ✨"]
+                        F22["[2] 0xFF"]
                         F23["[3] 0x44"]
                         end
 
