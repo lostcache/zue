@@ -1,81 +1,156 @@
-# Zue Storage Engine
+# Zue
 
-Zue is a distributed, replicated log-structured storage engine written in Zig, providing total ordering and strong consistency guarantees through Raft-like replication.
+A distributed, replicated log-structured storage engine written in Zig.
 
-## Core Design
+## Architecture
 
-The design is based on the following principles:
+```
+                        ┌────────────┐
+                        │   Client   │
+                        └─────┬──────┘
+                              │
+            Append (writes)   │   Read (any node)
+            ──────────────────┼──────────────────
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                         CLUSTER                             │
+│                                                             │
+│   ┌──────────┐    ReplicateRequest    ┌──────────┐         │
+│   │  Leader  │ ─────────────────────▶ │ Follower │         │
+│   │  :9001   │ ◀───────────────────── │  :9002   │         │
+│   │          │    ReplicateResponse   │          │         │
+│   │   Log    │                        │   Log    │         │
+│   │ ┌──────┐ │         Heartbeat      │ ┌──────┐ │         │
+│   │ │.log  │ │ ─────────────────────▶ │ │.log  │ │         │
+│   │ │.index│ │                        │ │.index│ │         │
+│   │ └──────┘ │                        │ └──────┘ │         │
+│   └──────────┘                        └──────────┘         │
+│        │                                                    │
+│        │              ReplicateRequest    ┌──────────┐     │
+│        └────────────────────────────────▶ │ Follower │     │
+│                                           │  :9003   │     │
+│                                           │   Log    │     │
+│                                           │ ┌──────┐ │     │
+│                                           │ │.log  │ │     │
+│                                           │ │.index│ │     │
+│                                           │ └──────┘ │     │
+│                                           └──────────┘     │
+└─────────────────────────────────────────────────────────────┘
 
-*   **Append-Only Log**: All writes are sequential appends to a log file, which provides O(1) write complexity and is optimal for most storage hardware.
-*   **Segmentation**: The log is partitioned into segments, each consisting of a `.log` file for data and a `.index` file. This allows for efficient, file-level data retention and cleanup.
-*   **Sparse Indexing**: To avoid the overhead of indexing every record, an index entry is created only at configurable intervals (e.g., every 4KB). This minimizes the index's memory footprint while still allowing for fast lookups.
-*   **Data Integrity**: All records and index entries are protected by CRC32 checksums to prevent data corruption.
-
-For a more detailed breakdown, see the [wiki](wiki/).
-
-## Getting Started
-
-### Prerequisites
-
-*   Zig `0.15.1` or later
-*   Python `3.7+` (for plotting benchmarks)
-
-### Build and Test
-
-To run all unit tests:
-
-```bash
-zig build test --summary all
+Write: Client → Leader → append local → replicate to followers → quorum ack → respond
+Read:  Client → any node → read from local log → respond
 ```
 
-To run integration tests:
+## Features
+
+### Storage
+- Append-only log with O(1) writes
+- Segmented storage (`.log` + `.index` files per segment)
+- Sparse indexing at configurable byte intervals
+- Memory-mapped I/O
+- CRC32 checksums
+
+### Replication
+- Leader-follower with quorum-based commits
+- ISR (In-Sync Replica) tracking
+- Parallel non-blocking replication
+- Background repair for lagging followers
+
+### Protocol
+- Length-prefixed binary format: `[4-byte length][1-byte type][payload]`
+- Operations: `Append`, `Read`, `Replicate`, `Heartbeat`
+
+## Build
+
+Requires Zig 0.15.1+
 
 ```bash
-zig build test-integration --summary all
+zig build
 ```
 
-To run replication tests:
-
-```bash
-zig build test-replication --summary all
-```
+Outputs `zue-server` and `zue-client` to `zig-out/bin/`.
 
 ## Usage
 
-(This section is under development. See the source code in `src/log/log.zig` for the public API or see the [wiki](wiki/).)
+### Server
 
-## Benchmarking
-
-The project includes a benchmark suite. A convenience script is provided to run the benchmarks and generate plots:
-
+Standalone:
 ```bash
-./run_benchmarks_and_plot.sh
+./zig-out/bin/zue-server <port> <data_dir>
 ```
 
-Benchmark data is stored in `/tmp/zue_bench_results/`, and plots are in `benchmark_plots/`.
+Cluster:
+```bash
+./zig-out/bin/zue-server <port> <data_dir> <cluster.conf> <node_id>
+```
 
-### Completed Features
+### Client
 
-- [x] **Core Log-Structured Storage Engine**: Append-only log with segmentation and sparse indexing
-- [x] **Leader-Follower Replication**: Raft-like consensus with parallel, non-blocking I/O
-  - Quorum-based commits with In-Sync Replica (ISR) tracking
-  - Leader-driven log repair for consistency
-  - Hybrid inline recovery for minimal latency (≤10 entry lag recovers inline)
-  - Heartbeat monitoring and automatic failure detection
+```bash
+./zig-out/bin/zue-client append <host> <port> <key> <value>
+./zig-out/bin/zue-client append <host> <port> - <value>   # null key
+./zig-out/bin/zue-client read <host> <port> <offset>
+```
 
-### In Progress / Future Work
+### Cluster Config
 
-- [ ] **Memory-Mapped I/O Integration**: mmap implementations exist but not yet integrated
-  - `MmapSegment`, `MmapIndex`, and `MmapLogReader`/`Writer` implementations complete
-  - Expected 10-100x faster index lookups, 5-50x faster log reads
-  - Needs integration into main `Log` and replication system
-- [ ] **Log Compaction**: Automatic cleanup of old/duplicate entries
-- [ ] **Leader Election**: Automatic failover on leader failure (currently static leader)
-- [ ] **Cluster Status API**: Programmatic monitoring of cluster state, ISR, and follower lag
+```
+node 1 192.168.1.10 9001 leader
+node 2 192.168.1.11 9002 follower
+node 3 192.168.1.12 9003 follower
 
-## Contributing
+quorum 2
+timeout 5000
+max_lag 1000
+heartbeat 2000
+```
 
-Contributions are welcome. Please open an issue to discuss your proposed changes.
+## Tests
+
+```bash
+zig build test                   # unit tests
+zig build test-integration       # integration tests  
+zig build test-replication       # replication tests
+```
+
+## Project Structure
+
+```
+src/
+├── server.zig              # TCP server
+├── client.zig              # Client library
+├── cli_client.zig          # CLI
+├── config.zig              # Cluster config parser
+├── log/
+│   ├── mmap_log.zig        # Multi-segment log
+│   ├── mmap_segment.zig    # Segment with mmap
+│   ├── mmap_index.zig      # Sparse index
+│   └── record.zig          # Record format
+├── network/
+│   └── protocol.zig        # Wire protocol
+└── replication/
+    ├── leader.zig          # Leader logic
+    └── follower.zig        # Follower logic
+```
+
+## Status
+
+### Implemented
+- [x] Log-structured storage with segments and sparse indexing
+- [x] Memory-mapped I/O (mmap segments, index, log writer)
+- [x] Leader-follower replication with quorum commits
+- [x] ISR tracking and background repair
+- [x] Binary network protocol
+- [x] CLI client
+- [x] Multi-VM deployment tooling
+
+### Not Implemented
+- [ ] Leader election (static leader assignment)
+- [ ] Log compaction
+- [ ] Cluster status API
+- [ ] Snapshots
 
 ## License
-[MIT](https://github.com/lostcache/zue/blob/main/LICENSE)
+
+MIT
