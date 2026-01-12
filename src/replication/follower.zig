@@ -70,6 +70,9 @@ pub const Follower = struct {
             last_offset = try self.log.append(entry.record);
         }
 
+        // Flush to disk for durability (async - schedules write without blocking)
+        try self.log.syncAsync();
+
         // Update commit index from leader
         self.commit_index = req.leader_commit;
 
