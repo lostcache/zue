@@ -869,7 +869,7 @@ test "replication: multiple concurrent writes stress test" {
     std.debug.print("✓ Test 8 passed: {d} rapid writes successfully replicated to all followers\n", .{num_writes});
 }
 
-test "replication: followers reject client requests with not_leader error" {
+test "replication: followers reject append requests but allow stale reads" {
     const allocator = testing.allocator;
 
     var cluster = try ReplicationCluster.init(allocator, 2);
@@ -877,6 +877,17 @@ test "replication: followers reject client requests with not_leader error" {
 
     // Wait for cluster to be ready
     std.Thread.sleep(3 * std.time.ns_per_s);
+
+    // First write a record via the leader so followers have data
+    var leader_client = try cluster.getLeaderClient();
+    defer leader_client.disconnect();
+
+    const leader_record = Record{ .key = "leader", .value = "works" };
+    const offset = try leader_client.append(leader_record);
+    try testing.expectEqual(@as(u64, 0), offset);
+
+    // Wait for replication
+    try waitForAllFollowersReplication(&cluster, offset, allocator, 5000);
 
     // Connect to follower 0 (not the leader)
     var follower_client = try cluster.getFollowerClient(0);
@@ -887,31 +898,49 @@ test "replication: followers reject client requests with not_leader error" {
     // Try to append to follower - should fail with not_leader error
     const record = Record{ .key = "test", .value = "should-fail" };
     const append_result = follower_client.append(record);
-
-    // Expect ServerError (the client receives an error response from the server)
     try testing.expectError(error.ServerError, append_result);
 
-    std.debug.print("Append correctly rejected by follower\n", .{});
-
-    // Try to read from follower - should also fail with not_leader error
+    // Try to read from follower - should succeed (stale reads allowed)
     const read_result = follower_client.read(0);
+    if (read_result) |read_record| {
+        defer {
+            if (read_record.key) |k| allocator.free(k);
+            allocator.free(read_record.value);
+        }
+        try testing.expectEqualStrings("leader", read_record.key.?);
+        try testing.expectEqualStrings("works", read_record.value);
+    } else |_| {
+        return error.TestFailed;
+    }
+}
 
-    // Expect ServerError
-    try testing.expectError(error.ServerError, read_result);
+test "replication: followers allow stale reads after replication" {
+    const allocator = testing.allocator;
 
-    std.debug.print("Read correctly rejected by follower\n", .{});
+    var cluster = try ReplicationCluster.init(allocator, 2);
+    defer cluster.deinit();
 
-    // Now verify that writes to the actual leader still work
+    std.Thread.sleep(3 * std.time.ns_per_s);
+
     var leader_client = try cluster.getLeaderClient();
     defer leader_client.disconnect();
 
-    const leader_record = Record{ .key = "leader", .value = "works" };
-    const offset = try leader_client.append(leader_record);
-    try testing.expectEqual(@as(u64, 0), offset);
+    const record = Record{ .key = "test-key", .value = "test-value" };
+    const offset = try leader_client.append(record);
 
-    std.debug.print("Write to leader succeeded as expected\n", .{});
+    try waitForAllFollowersReplication(&cluster, offset, allocator, 5000);
 
-    std.debug.print("✓ Test 9 passed: Followers correctly reject client requests\n", .{});
+    var follower_client = try cluster.getFollowerClient(0);
+    defer follower_client.disconnect();
+
+    const read_record = try follower_client.read(offset);
+    defer {
+        if (read_record.key) |k| allocator.free(k);
+        allocator.free(read_record.value);
+    }
+
+    try testing.expectEqualStrings("test-key", read_record.key.?);
+    try testing.expectEqualStrings("test-value", read_record.value);
 }
 
 test "replication: true concurrent writes from multiple threads" {
