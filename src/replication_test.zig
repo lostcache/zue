@@ -164,22 +164,32 @@ const ReplicationCluster = struct {
     }
 
     /// Restart a killed follower
+    /// IMPORTANT: Keeps the data directory intact to simulate realistic restart behavior
     fn restartFollower(self: *ReplicationCluster, follower_index: usize) !void {
         if (follower_index >= self.followers.len) return error.InvalidFollowerIndex;
 
         const follower = &self.followers[follower_index];
 
-        // Clean up old tmp_path and tmp_dir
-        self.allocator.free(follower.tmp_path);
-        follower.tmp_dir.cleanup();
+        // DON'T delete the tmp_dir - we want to keep existing log segments!
+        // This simulates a realistic restart where data persists across restarts.
 
-        // Restart the process with the same node_id and port, but a new tmp_dir
-        const node = try startNode(self.allocator, follower.node_id, follower.port, self.config_path);
+        // Spawn a new process pointing to the SAME data directory
+        const port_str = try std.fmt.allocPrint(self.allocator, "{d}", .{follower.port});
+        defer self.allocator.free(port_str);
 
-        // Replace all fields with the new node
-        follower.process = node.process;
-        follower.tmp_dir = node.tmp_dir;
-        follower.tmp_path = node.tmp_path;
+        const node_id_str = try std.fmt.allocPrint(self.allocator, "{d}", .{follower.node_id});
+        defer self.allocator.free(node_id_str);
+
+        const args = [_][]const u8{ "zig-out/bin/zue-server", port_str, follower.tmp_path, self.config_path, node_id_str };
+
+        var server_process = std.process.Child.init(&args, self.allocator);
+        server_process.stdout_behavior = .Inherit;
+        server_process.stderr_behavior = .Inherit;
+
+        try server_process.spawn();
+
+        // Update only the process handle - keep the same tmp_dir and tmp_path
+        follower.process = server_process;
 
         // Wait for server to be ready
         try waitForServer(follower.port);
