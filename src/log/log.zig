@@ -137,6 +137,14 @@ pub const Log = struct {
         return offset;
     }
 
+    pub fn sync(self: *Log) !void {
+        try self.segments.items[self.active_segment_index].sync();
+    }
+
+    pub fn syncAsync(self: *Log) !void {
+        try self.segments.items[self.active_segment_index].syncAsync();
+    }
+
     pub fn read(self: *Log, offset: u64, allocator: std.mem.Allocator) !Record {
         const seg = self.findSegmentForOffset(offset) orelse return error.OffsetNotFound;
         return seg.read(offset, allocator) catch |err| {
