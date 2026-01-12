@@ -544,6 +544,11 @@ pub const Leader = struct {
                 }
             }
         }
+
+        // Mark any remaining non-responsive followers as out-of-sync
+        for (pending_followers.items) |follower| {
+            follower.in_sync = false;
+        }
     }
 
     /// Replicate record to followers (PARALLEL using non-blocking I/O)
