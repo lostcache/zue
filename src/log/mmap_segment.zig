@@ -80,43 +80,38 @@ pub const MmapSegment = struct {
     // TODO: Extract the rebuild logic into a separate function
     pub fn open(seg_config: segment.SegmentConfig, abs_base_path: []const u8, base_offset: u64, gpa_alloc: std.mem.Allocator) !MmapSegment {
         const log_file_path = try getAllocLogFilePath(gpa_alloc, abs_base_path, base_offset);
-        var log_file_path_allocated = true;
-        errdefer {
-            if (log_file_path_allocated) {
-                gpa_alloc.free(log_file_path);
-            }
-        }
+        errdefer gpa_alloc.free(log_file_path);
 
         var log_writer = try mmap_log.MmapLogWriter.open(log_file_path, seg_config.log_config, gpa_alloc);
-        var log_writer_opened = true;
-        errdefer {
-            if (log_writer_opened) {
-                log_writer.close();
-            }
-        }
+        errdefer log_writer.close();
 
         const index_file_path = try getAllocIndexFilePath(gpa_alloc, abs_base_path, base_offset);
         errdefer gpa_alloc.free(index_file_path);
 
-        var index = mmap_index.MmapIndex.open(index_file_path, seg_config.index_config) catch |err| {
-            log_writer.close();
-            gpa_alloc.free(log_file_path);
-            log_writer_opened = false;
-            log_file_path_allocated = false;
-            return err;
+        // ALWAYS rebuild index from log file (source of truth)
+        // Delete old index if it exists and create fresh one
+        std.fs.deleteFileAbsolute(index_file_path) catch |err| {
+            // FileNotFound is expected and fine - index might not exist yet
+            if (err != error.FileNotFound) {
+                std.debug.print("Warning: Failed to delete old index file: {}\n", .{err});
+            }
         };
-        errdefer {
-            index.close();
-        }
 
-        const actual_data_size = log_writer.getCurrentPos();
+        std.debug.print("Rebuilding index from log for segment {}\n", .{base_offset});
 
+        // Create fresh index file
+        var index = try mmap_index.MmapIndex.create(index_file_path, seg_config.index_config);
+        errdefer index.close();
+
+        // Get actual file size from disk (source of truth)
         const log_file_size = blk: {
             const file = try std.fs.openFileAbsolute(log_file_path, .{});
             defer file.close();
             const stat = try file.stat();
             break :blk stat.size;
         };
+
+        std.debug.print("Rebuilding index: log_file_size={}\n", .{log_file_size});
 
         // Rebuild the index from the log (the log is the source of truth)
         var next_relative_offset: u32 = 0;
@@ -127,7 +122,7 @@ pub const MmapSegment = struct {
         const temp_alloc = arena.allocator();
 
         var pos: u64 = 0;
-        while (pos < actual_data_size) {
+        while (pos < log_file_size) {
             // Check if we should create an index entry
             const should_create_index = bytes_since_last_index >= seg_config.index_config.bytes_per_index or next_relative_offset == 0;
 
@@ -142,7 +137,7 @@ pub const MmapSegment = struct {
             const rec = deserializeRecordAt(&log_writer, pos, temp_alloc, seg_config.log_config) catch break;
             _ = rec;
 
-            const rec_size = try recordSizeAt(&log_writer, pos, actual_data_size, seg_config.log_config);
+            const rec_size = try recordSizeAt(&log_writer, pos, log_file_size, seg_config.log_config);
             pos += rec_size;
             bytes_since_last_index += rec_size;
             next_relative_offset += 1;
@@ -242,6 +237,11 @@ pub const MmapSegment = struct {
     pub fn sync(self: *MmapSegment) !void {
         try self.log_writer.sync();
         try self.index.sync();
+    }
+
+    pub fn syncAsync(self: *MmapSegment) !void {
+        try self.log_writer.syncAsync();
+        try self.index.syncAsync();
     }
 };
 
