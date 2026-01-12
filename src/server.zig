@@ -296,16 +296,10 @@ pub const Server = struct {
 
             .read_request => |req| {
                 // Followers reject client read requests (could be relaxed to allow stale reads)
-                if (self.role == .follower) {
-                    const leader_addr = if (self.cluster_config) |cfg| blk: {
-                        const leader = cfg.getLeader();
-                        break :blk if (leader) |l| l.address else "unknown";
-                    } else "unknown";
-
-                    std.debug.print("Follower rejecting read request, redirecting to leader at {s}\n", .{leader_addr});
-                    try self.sendErrorResponseDirect(socket_handle, .not_leader, "This node is a follower, redirect to leader");
-                    return;
-                }
+                // if (self.role == .follower) {
+                //     try self.sendErrorResponseDirect(socket_handle, .not_leader, "This node is a follower, redirect to leader");
+                //     return;
+                // }
 
                 std.debug.print("Processing read request (offset={})\n", .{req.offset});
 
@@ -347,10 +341,10 @@ pub const Server = struct {
                     return;
                 }
 
-                // std.debug.print("[FOLLOWER] Received replication request (entries={}, leader_commit={})\n", .{
-                //     req.entries.len,
-                //     req.leader_commit,
-                // });
+                std.debug.print("[FOLLOWER] Received replication request (entries={}, leader_commit={})\n", .{
+                    req.entries.len,
+                    req.leader_commit,
+                });
 
                 const resp = try self.follower.?.handleReplicateRequest(req);
 
@@ -456,8 +450,18 @@ pub fn main() !void {
     const log_config = LogConfig{
         .segment_config = SegmentConfig.default(),
     };
-    var log = try Log.create(log_config, log_dir, allocator);
+
+    // Try to open existing log, create new one only if it doesn't exist
+    var log = Log.open(log_config, log_dir, allocator) catch |err| blk: {
+        if (err == error.NoSegmentsFound or err == error.FileNotFound) {
+            std.debug.print("No existing log found, creating new log at {s}\n", .{log_dir});
+            break :blk try Log.create(log_config, log_dir, allocator);
+        }
+        return err;
+    };
     defer log.close();
+
+    std.debug.print("Log opened: next_offset={}, segment_count={}\n", .{ log.getNextOffset(), log.getSegmentCount() });
 
     const server_config = ServerConfig{
         .port = port,
