@@ -176,25 +176,6 @@ pub fn build(b: *std.Build) void {
     const replication_test_step = b.step("test-replication", "Run replication integration tests (spawns multi-node cluster)");
     replication_test_step.dependOn(&run_replication_tests.step);
 
-    // Benchmark executable
-    const bench_exe = b.addExecutable(.{
-        .name = "bench",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/bench.zig"),
-            .target = target,
-            .optimize = .ReleaseFast,
-        }),
-    });
-
-    // Install the benchmark executable
-    b.installArtifact(bench_exe);
-
-    // Benchmark run step (independent of main exe installation)
-    const run_bench = b.addRunArtifact(bench_exe);
-
-    const bench_step = b.step("bench", "Run performance benchmarks");
-    bench_step.dependOn(&run_bench.step);
-
     // Server executable
     const server_exe = b.addExecutable(.{
         .name = "zue-server",
