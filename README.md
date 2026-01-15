@@ -4,42 +4,68 @@ A distributed, replicated log-structured storage engine written in Zig.
 
 ## Architecture
 
+### Cluster Topology
 ```
-                        ┌────────────┐
-                        │   Client   │
-                        └─────┬──────┘
-                              │
-            Append (writes)   │   Read (any node)
-            ──────────────────┼──────────────────
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│                         CLUSTER                             │
-│                                                             │
-│   ┌──────────┐    ReplicateRequest    ┌──────────┐         │
-│   │  Leader  │ ─────────────────────▶ │ Follower │         │
-│   │  :9001   │ ◀───────────────────── │  :9002   │         │
-│   │          │    ReplicateResponse   │          │         │
-│   │   Log    │                        │   Log    │         │
-│   │ ┌──────┐ │         Heartbeat      │ ┌──────┐ │         │
-│   │ │.log  │ │ ─────────────────────▶ │ │.log  │ │         │
-│   │ │.index│ │                        │ │.index│ │         │
-│   │ └──────┘ │                        │ └──────┘ │         │
-│   └──────────┘                        └──────────┘         │
-│        │                                                    │
-│        │              ReplicateRequest    ┌──────────┐     │
-│        └────────────────────────────────▶ │ Follower │     │
-│                                           │  :9003   │     │
-│                                           │   Log    │     │
-│                                           │ ┌──────┐ │     │
-│                                           │ │.log  │ │     │
-│                                           │ │.index│ │     │
-│                                           │ └──────┘ │     │
-│                                           └──────────┘     │
-└─────────────────────────────────────────────────────────────┘
+                     ┌───────────────┐
+                     │    Clients    │
+                     └───────┬───────┘
+                             │ (Write / Read)
+                             ▼
+                  ┌──────────────────────┐
+                  │      Leader Node     │
+                  │  (Handles Writes)    │
+                  └──────────┬───────────┘
+          (Replicate)        │        (Replicate)
+       ┌─────────────────────┼─────────────────────┐
+       ▼                     ▼                     ▼
+┌──────────────┐      ┌──────────────┐      ┌──────────────┐
+│ Follower Node│      │ Follower Node│      │ Follower Node│
+│   (Replica)  │      │   (Replica)  │      │   (Replica)  │
+└──────────────┘      └──────────────┘      └──────────────┘
+```
 
-Write: Client → Leader → append local → replicate to followers → quorum ack → respond
-Read:  Client → any node → read from local log → respond
+### Node Internal Architecture
+```
+┌─────────────────────────────────────────────────────────────┐
+│                       Zue Server Node                       │
+│                                                             │
+│  ┌──────────────────────┐       ┌──────────────────────┐    │
+│  │   Network Layer      │<----->│      Event Loop      │    │
+│  │ (src/network/*.zig)  │       │ (src/event_loop.zig) │    │
+│  │  - Protocol Parsing  │       │  - epoll / kqueue    │    │
+│  │  - Connection Mgmt   │       └──────────────────────┘    │
+│  └──────────┬───────────┘                                   │
+│             │                                               │
+│             ▼                                               │
+│  ┌──────────────────────┐                                   │
+│  │  Replication Logic   │                                   │
+│  │ (src/replication/*)  │                                   │
+│  │                      │                                   │
+│  │ [Leader Role]        │ OR    [Follower Role]             │
+│  │ - follower_tracker   │       - Validates continuity      │
+│  │ - quorum consensus   │       - Syncs to disk             │
+│  └──────────┬───────────┘                                   │
+│             │                                               │
+│             ▼                                               │
+│  ┌───────────────────────────────────────────────────────┐  │
+│  │                   Storage Engine                      │  │
+│  │                   (src/log/*.zig)                     │  │
+│  │                                                       │  │
+│  │   ┌─────────────┐   ┌─────────────┐   ┌─────────────┐ │  │
+│  │   │     Log     │──►│   Segment   │──►│   Segment   │ │  │
+│  │   │  (Manager)  │   │  (Active)   │   │  (Sealed)   │ │  │
+│  │   └─────────────┘   └──────┬──────┘   └──────┬──────┘ │  │
+│  └────────────────────────────┼─────────────────┼────────┘  │
+└───────────────────────────────┼─────────────────┼───────────┘
+                                ▼                 ▼
+                        ┌──────────────┐   ┌──────────────┐
+   Disk Files           │ .log (Data)  │   │ .log (Data)  │
+   (mmap)               │ .index (Idx) │   │ .index (Idx) │
+                        └──────────────┘   └──────────────┘
+```
+
+Write Path: Client → Leader → append local → replicate to followers → quorum ack → respond
+Read Path:  Client → any node → read from local log → respond
 ```
 
 ## Features
