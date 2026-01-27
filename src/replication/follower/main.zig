@@ -1,5 +1,5 @@
 const std = @import("std");
-const Log = @import("../../log/log.zig").Log;
+const Log = @import("../../log.zig").Log;
 const Record = @import("../../log/record.zig").Record;
 const protocol = @import("../../network/protocol.zig");
 const request_handlers = @import("request_handlers.zig");

@@ -1,5 +1,5 @@
 const std = @import("std");
-const Log = @import("../../log/log.zig").Log;
+const Log = @import("../../log.zig").Log;
 const Record = @import("../../log/record.zig").Record;
 const ClusterConfig = @import("../../config.zig").ClusterConfig;
 const FollowerConnection = @import("follower_connection.zig").FollowerConnection;

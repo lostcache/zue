@@ -1,7 +1,7 @@
 const std = @import("std");
 const Server = @import("server.zig").Server;
 const ServerConfig = @import("server.zig").ServerConfig;
-const Log = @import("log/log.zig").Log;
+const Log = @import("log.zig").Log;
 const AppConfig = @import("config_loader.zig").AppConfig;
 
 pub fn main() !void {
@@ -44,7 +44,8 @@ pub fn main() !void {
 }
 
 test {
-    std.testing.refAllDecls(@import("log/log.zig"));
+    std.testing.refAllDecls(@import("log/main.zig"));
+    std.testing.refAllDecls(@import("log/mmap_log_test.zig"));
     std.testing.refAllDecls(@import("network/protocol.zig"));
     std.testing.refAllDecls(@import("replication/follower_tracker.zig"));
     std.testing.refAllDecls(@import("replication/follower.zig"));

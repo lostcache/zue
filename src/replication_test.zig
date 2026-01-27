@@ -12,8 +12,8 @@ const fs = std.fs;
 
 const Client = @import("client.zig").Client;
 const Record = @import("log/record.zig").Record;
-const Log = @import("log/log.zig").Log;
-const LogConfig = @import("log/log.zig").LogConfig;
+const Log = @import("log.zig").Log;
+const LogConfig = @import("log.zig").LogConfig;
 
 // ============================================================================
 // Test Configuration

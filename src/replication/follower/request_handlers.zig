@@ -1,5 +1,5 @@
 const std = @import("std");
-const Log = @import("../../log/log.zig").Log;
+const Log = @import("../../log.zig").Log;
 const protocol = @import("../../network/protocol.zig");
 
 const ReplicateRequest = protocol.ReplicateRequest;
