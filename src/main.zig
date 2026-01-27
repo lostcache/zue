@@ -47,6 +47,7 @@ test {
     std.testing.refAllDecls(@import("log/main.zig"));
     std.testing.refAllDecls(@import("log/mmap_log_test.zig"));
     std.testing.refAllDecls(@import("network/protocol.zig"));
+    std.testing.refAllDecls(@import("network/protocol_test.zig"));
     std.testing.refAllDecls(@import("replication/follower_tracker.zig"));
     std.testing.refAllDecls(@import("replication/follower.zig"));
     std.testing.refAllDecls(@import("replication/leader.zig"));
